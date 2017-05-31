@@ -69,7 +69,7 @@ class fitdict:
         # Plot the lines to show what we are fitting. This allows a quick check
         # that everything is running OK.
 
-        if kwargs.get('plot', True):
+        if kwargs.get('plot', False):
             self.plotlines()
 
         return

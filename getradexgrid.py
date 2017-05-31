@@ -38,7 +38,7 @@ def runRADEX(species, widths, temperatures, densities, columns, **kwargs):
     rates_path = os.getenv('RADEX_DATAPATH')
     if not os.path.isfile('{}{}.dat'.format(rates_path, species)):
         raise ValueError('Not found collisional rates.')
-    rates = lamdaclass.ratefile('{}{}.dat'.format(rates_path, species))
+    rates = ratefile('{}{}.dat'.format(rates_path, species))
 
     # We assume that the density is n(H2) and the ortho/para ratio is 3.
     # Check if oH2 and pH2 are valid colliders in the collisional rate file.
@@ -139,4 +139,4 @@ if __name__ == '__main__':
     temperatures = np.linspace(vals[3], vals[4], vals[5])
     densities = np.logspace(vals[6], vals[7], vals[8])
     columns = np.logspace(vals[9], vals[10], vals[11])
-    runRadex(species, widths, temperatures, densities, columns)
+    runRADEX(species, widths, temperatures, densities, columns)
