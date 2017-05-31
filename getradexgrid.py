@@ -15,7 +15,7 @@ import sys
 import time
 import pyradex
 import numpy as np
-from makeLime import lamdaclass
+from limepy.analysis.collisionalrates import ratefile
 
 # Suppress all the numerical warnings from pyradex.
 import warnings
