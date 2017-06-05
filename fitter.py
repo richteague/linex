@@ -29,10 +29,10 @@ class fitdict:
         """Fit the slab models."""
         self.dic = slabdic
         self.trans = sorted([k for k in self.dic.keys()])
-        self.peaks = np.squeeze([self.dic[k].Tb for k in self.trans])
-        self.widths = np.squeeze([self.dic[k].dx for k in self.trans])
-        self.velaxs = np.squeeze([self.dic[k].velax for k in self.trans])
-        self.spectra = np.squeeze([self.dic[k].spectrum for k in self.trans])
+        self.peaks = [self.dic[k].Tb for k in self.trans]
+        self.widths = [self.dic[k].dx for k in self.trans]
+        self.velaxs = [self.dic[k].velax for k in self.trans]
+        self.spectra = [self.dic[k].spectrum for k in self.trans]
         self.grid = radexgrid(radexgridpath)
         self.mu = self.dic[self.trans[0]].mu
         self.params = []
@@ -52,19 +52,30 @@ class fitdict:
         if self.fluxcal.size == 1:
             self.fluxcal = np.squeeze([self.fluxcal for p in self.peaks])
         self.spectra = self.addfluxcal(self.spectra, self.fluxcal)
-        self.peaks = np.nanmax(self.spectra, axis=1)
+        self.peaks = [np.nanmax(s) for s in self.spectra]
 
         # The noise, a fraction of the peak value, can be specified either
         # individually as a list for the lines. Random noise is then added to
         # each of the spectra, including the peaks after converting the RMS
         # value to units of [K].
 
-        self.rms = np.squeeze(kwargs.get('rms', 0.001))
-        if self.rms.size == 1:
-            self.rms = np.squeeze([self.rms for p in self.peaks])
-        self.rms *= self.peaks
+        self.rms = np.squeeze(kwargs.get('rms', None))
+        if self.rms is not None:
+            rms = []
+            for i, t in enumerate(self.trans):
+                dx = self.widths[i]
+                velo = self.velaxs[i]
+                spec = self.spectra[i]
+                x0 = velo[abs(spec).argmax()]
+                rms.append(np.nanstd(spec[abs(velo-x0) > 3. * dx]))
+            self.rms = np.squeeze(rms)
+        else:
+            if self.rms.size == 1:
+                self.rms = np.squeeze([self.rms for p in self.peaks])
+            self.rms *= self.peaks
+
         self.spectra = self.addnoise(self.spectra, self.rms)
-        self.peaks = np.nanmax(self.spectra, axis=1)
+        self.peaks = [np.nanmax(s) for s in self.spectra]
 
         # Plot the lines to show what we are fitting. This allows a quick check
         # that everything is running OK.
@@ -85,10 +96,13 @@ class fitdict:
 
     def _lnx2(self, modelspectra):
         """Log-Chi-squared function."""
-        unc = np.hypot(self.spectra * self.fluxcal[:, None], self.rms[:, None])
-        lnx2 = ((self.spectra - modelspectra) / unc)**2
-        lnx2 += np.log(unc**2 * np.sqrt(2. * np.pi))
-        return -0.5 * np.nansum(lnx2)
+        lnx2 = []
+        for i, mod in enumerate(modelspectra):
+            s = self.spectra[i]
+            dy = np.hypot(s * self.fluxcal[i], self.rms[i])
+            dlnx2 = ((s - mod) / dy)**2 + np.log(dy**2 * np.sqrt(2. * np.pi))
+            lnx2.append(-0.5 * np.nansum(dlnx2))
+        return np.nansum(lnx2)
 
     def _lnprior(self, theta):
         """Log-prior function."""
