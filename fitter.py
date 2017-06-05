@@ -188,7 +188,8 @@ class fitdict:
         spectra = [[self._spectrum(j, t, d, s, v, x0, dx)
                     for d in dgrid for t in tgrid] for j, v, x0, dx in toiter]
         spectra = np.squeeze(spectra)
-        if spectra.ndim == 3:
+
+        if any('_min' in p for p in self.params):
             spectra = np.average(np.squeeze(spectra), axis=1)
         return self._lnx2(self.addfluxcal(spectra, self.fluxcal))
 
