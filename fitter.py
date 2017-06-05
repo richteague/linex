@@ -19,7 +19,7 @@ standard units of [km/s].
 import emcee
 import numpy as np
 import scipy.constants as sc
-from radexcee.radexgridclass import radexgrid
+from linex.radexgridclass import radexgrid
 import matplotlib.pyplot as plt
 
 
