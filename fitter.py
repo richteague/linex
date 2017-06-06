@@ -51,7 +51,8 @@ class fitdict:
         self.fluxcal = np.squeeze(kwargs.get('fluxcal', 0.0))
         if self.fluxcal.size == 1:
             self.fluxcal = np.squeeze([self.fluxcal for p in self.peaks])
-        self.spectra = self.addfluxcal(self.spectra, self.fluxcal)
+        if kwargs.get('addfluxcal', True):
+            self.spectra = self.addfluxcal(self.spectra, self.fluxcal)
         self.peaks = [np.nanmax(s) for s in self.spectra]
 
         # The noise, a fraction of the peak value, can be specified either
