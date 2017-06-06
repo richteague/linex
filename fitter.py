@@ -189,7 +189,7 @@ class fitdict:
                     for d in dgrid for t in tgrid] for j, v, x0, dx in toiter]
         spectra = np.squeeze(spectra)
 
-        if any('_min' in p for p in self.params):
+        if len(tgrid) > 1 or len(dgrid) > 1:
             spectra = np.average(np.squeeze(spectra), axis=1)
         return self._lnx2(self.addfluxcal(spectra, self.fluxcal))
 
