@@ -1,19 +1,7 @@
 """
 Class to fit slab models with a range in temperature and density.
 
-Input widths are non-thermal widths. As there are now temperature gradients
-the linewidth will change as a function of temperature.
-
-The sampling of the temperature and density gradients is set by three
-parameters: 'maxnslab', the maximum number of samples along each gradient;
-and 'mindX' (where X is temp or dens), which specifies the minimum spacing
-between samples. This is in a bid to stop calls sampling gradients that are
-essential non-existant. This needs to be tested. The resulting spectra will be
-an average over all the spectra sampling the range in parameter space. This
-results in the maximum of 100 spectra.
-
-Notation, dx is the turbulent width, dV is the total line width. Both have
-standard units of [km/s].
+Same as fitter.py except there is a common Mach value for all three lines.
 """
 
 import emcee
@@ -107,7 +95,7 @@ class fitdict:
     def _lnprior(self, theta):
         """Log-prior function."""
 
-        tmin, tmax, dmin, dmax, sigma, x0s, dxs, dVs = self._parse(theta)
+        tmin, tmax, dmin, dmax, sigma, x0s, Ms, dVs = self._parse(theta)
 
         # Minimum and maximum gradients must be in order.
 
@@ -140,9 +128,8 @@ class fitdict:
         for x0, velax in zip(x0s, self.velaxs):
             if x0 < velax[0] or x0 > velax[-1]:
                 return -np.inf
-        for dx in dxs:
-            if dx < 0:
-                return -np.inf
+        if any([M < 0 for M in Ms]):
+            return -np.inf
         return 0.0
 
     def _parse(self, theta):
@@ -153,25 +140,27 @@ class fitdict:
         didx = int('dens_max' in self.params)
         tmin = theta[0]
         tmax = theta[tidx]
+        # if all(['dens' not in p for p in self.params])
         dmin = theta[1+tidx]
         dmax = theta[1+tidx+didx]
         sigma = theta[2+tidx+didx]
 
-        # Line properties.
-        # TODO: fill this in backwards, might be quicker than zipping.
+        # Line properties. Spiecifed by a line centre, x0, and a Mach number
+        # describing the non-thermal broadening of the line. Note the returned
+        # value of self.linewidth is the standard deviation of the line.
 
-        x0s = [t for t, p in zip(theta, self.params) if 'x0' in p]
-        dxs = [t for t, p in zip(theta, self.params) if 'dx' in p]
-        dVs = [min([self.linewidth(tmin, dx) for dx in dxs]),
-               max([self.linewidth(tmax, dx) for dx in dxs])]
+        x0s = [theta[i] for i in [-6, -4, -2]]
+        Ms = [theta[i] for i in [-5, -3, -1]]
+        dVs = [min([self.linewidth(tmin, M) for M in Ms]),
+               max([self.linewidth(tmax, M) for M in Ms])]
 
-        return tmin, tmax, dmin, dmax, sigma, x0s, dxs, dVs
+        return tmin, tmax, dmin, dmax, sigma, x0s, Ms, dVs
 
     def _lnlike(self, theta):
         """Log-likelihood for fitting peak brightness."""
 
         # Parse all the free parameters.
-        tmin, tmax, dmin, dmax, s, x0s, dxs, _ = self._parse(theta)
+        tmin, tmax, dmin, dmax, s, x0s, Ms, _ = self._parse(theta)
 
         # Create the gradients in temperature and density.
         tgrid = np.arange(tmin, tmax+1e-4, self.mindtemp)
@@ -184,18 +173,18 @@ class fitdict:
         # Build the models. Need to loop through each kinetic temperature and
         # n(H2) value. Each time making sure to calculate the correct width.
 
-        toiter = zip(self.trans, self.velaxs, x0s, dxs)
-        spectra = [[self._spectrum(j, t, d, s, v, x0, dx)
-                    for d in dgrid for t in tgrid] for j, v, x0, dx in toiter]
+        toiter = zip(self.trans, self.velaxs, x0s, Ms)
+        spectra = [[self._spectrum(j, t, d, s, v, x0, M)
+                    for d in dgrid for t in tgrid] for j, v, x0, M in toiter]
         spectra = np.squeeze(spectra)
 
         if len(tgrid) > 1 or len(dgrid) > 1:
             spectra = np.average(np.squeeze(spectra), axis=1)
         return self._lnx2(self.addfluxcal(spectra, self.fluxcal))
 
-    def _spectrum(self, j, t, d, s, x, x0, dx):
+    def _spectrum(self, j, t, d, s, x, x0, mach):
         """Returns a spectrum on the provided velocity axis."""
-        dV = self.linewidth(t, dx)
+        dV = self.linewidth(t, mach)
         A = self.grid.intensity(j, dV, t, d, s)
         return self.gaussian(x, x0, dV, A)
 
@@ -206,8 +195,8 @@ class fitdict:
         nwalkers = kwargs.get('nwalkers', 200)
         nburnin = kwargs.get('nburnin', 500)
         nsteps = kwargs.get('nsteps', 500)
-        tgrad = kwargs.get('tgrad', True)
-        dgrad = kwargs.get('dgrad', True)
+        tgrad = kwargs.get('tgrad', False)
+        dgrad = kwargs.get('dgrad', False)
 
         # Set up the parameters and the sampler.
         self.params = []
@@ -221,7 +210,7 @@ class fitdict:
             self.params += ['dens']
         self.params += ['sigma']
         for i in range(len(self.trans)):
-            self.params += ['x0_%d' % i, 'dx_%d' % i]
+            self.params += ['x0_%d' % i, 'mach_%d' % i]
         ndim = len(self.params)
         sampler = emcee.EnsembleSampler(nwalkers, ndim, self._lnprob)
 
@@ -233,7 +222,7 @@ class fitdict:
 
         p0 = kwargs.get('p0', None)
         if p0 is None:
-            print('Estimating p0...')
+            print('Estimating p0. Will take twice as long...')
             pos = [self.grid.random_samples(p.split('_')[0], nwalkers)
                    for p in self.params
                    if p.split('_')[0] in self.grid.parameters]
@@ -298,9 +287,15 @@ class fitdict:
         """Thermal Doppler width [km/s]."""
         return np.sqrt(2. * sc.k * T / self.mu / sc.m_p) / 1e3
 
-    def linewidth(self, T, v_turb):
-        """Standard deviation of the line, dV [km/s]."""
-        return np.hypot(self.thermalwidth(T), v_turb) / np.sqrt(2)
+    def soundspeed(self, T):
+        """Soundspeed of gas [km/s]."""
+        return np.sqrt(sc.k * T / 2.34 / sc.m_p) / 1e3
+
+    def linewidth(self, T, Mach):
+        """Standard deviation of line, dV [km/s]."""
+        v_therm = self.thermalwidth(T)
+        v_turb = Mach * self.soundspeed(T)
+        return np.hypot(v_therm, v_turb) / np.sqrt(2)
 
     def addfluxcal(self, spectra, fluxcal):
         """Add flux calibration uncertainty to the spectra."""
