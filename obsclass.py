@@ -18,10 +18,11 @@ warnings.simplefilter("ignore")
 
 class obsglobal:
 
-    def __init__(self, name, dir='./', molecule='cs', mu=44.):
-        self.dir = dir
+    def __init__(self, name, **kwargs):
+        self.verbose = kwargs.get('verbose', False)
+        self.dir = kwargs.get('dir', './')
         self.name = name
-        self.molecule = molecule
+        self.molecule = kwargs.get('molecule', 'cs')
         self.files = self.findfiles()
         self.datas = [np.load(fn) for fn in self.files]
         self.velaxs = np.squeeze([d[0] for d in self.datas])
@@ -32,7 +33,7 @@ class obsglobal:
             self.radii = np.unique(self.radii)
         self.spectra = [d[2] for d in self.datas]
         self.trans = [self.findtransitions(fn) for fn in self.files]
-        self.mu = mu
+        self.mu = kwargs.get('mu', 44.)
         return
 
     def findfiles(self):
@@ -40,9 +41,10 @@ class obsglobal:
         files = sorted([self.dir + fn for fn in os.listdir(self.dir)
                         if fn.endswith('average.npy')
                         and self.name in fn])
-        print('Selecting the following files:')
-        for fn in files:
-            print(r'%s' % (fn))
+        if self.verbose:
+            print('Selecting the following files:')
+            for fn in files:
+                print(r'%s' % (fn))
         return files
 
     def findtransitions(self, path):
@@ -57,7 +59,8 @@ class obsglobal:
     def getdict(self, radius):
         """Returns a dictionary of the spectra at a given (nearest) radius."""
         ridx = abs(self.radii - radius).argmin()
-        print('Requested %.3f", found %.3f".' % (radius, self.radii[ridx]))
+        if self.verbose:
+            print('Requested %.3f", found %.3f".' % (radius, self.radii[ridx]))
         return {t: obsmodel(self.spectra[i][ridx], self.velaxs[i], self.mu)
                 for i, t in enumerate(self.trans)}
 
