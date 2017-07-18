@@ -7,9 +7,14 @@ index for use with the RADEX grids generated with getradexgrid.py.
 It will also find p0 values for an assumed Gaussian profile. This is not
 correct but will give a good starting point for fits to the profile. The
 fitting can be achived with slabfitter.py.
+
+Noise can be added to the slab as a fraction of the peak value. Typical noise
+levels in the ALMA observations are on the order of 3%. TODO: Include the
+possibility to include flux calibration uncertainties.
 """
 
 import os
+import george
 import warnings
 import numpy as np
 from astropy.io import fits
@@ -20,7 +25,7 @@ warnings.simplefilter("ignore")
 
 class slabmodel:
 
-    def __init__(self, path, molecule='cs'):
+    def __init__(self, path, molecule='cs', noise=None, vcorr=None):
         """Slab model class."""
         self.path = path
         self.molecule = molecule
@@ -34,6 +39,25 @@ class slabmodel:
         self.p0 = self.fitGaussian()
         self.x0, self.dx, self.Tb = self.p0
         self.mu = self.rates.mu
+
+        # Include the noise if requested. If a correlation lenght is requested
+        # then create correlated noise through a Gaussian Process. Use the
+        # Matern52Kernel so that is if different from the ExpSquaredKernel used
+        # in the fitting.
+
+        if noise is not None:
+            if noise > 0.1:
+                print('Noise is greater than 10%, are you sure?')
+            if vcorr is None:
+                noise *= self.Tb * np.random.randn(self.spectrum.size)
+                self.spectrum += noise
+            else:
+                if vcorr == 0.0:
+                    raise ValueError("'vcorr' must be > 0.")
+                kern = george.kernels.Matern52Kernel(vcorr / 1e3)
+                kern = george.GP((noise * self.Tb)**2 * kern)
+                self.spectrum += kern.sample(self.velax)
+                print("Assuming a correlation of %.2g m/s." % vcorr)
         return
 
     def fitGaussian(self):
@@ -86,11 +110,13 @@ class slabmodel:
         return T / np.pi / dpix / dpix
 
 
-def slabdictionary(identifier='', dir='./'):
+def slabdictionary(identifier='', dir='./', noise=None, vcorr=None):
     """Returns a dictionary of slab models for the fitter."""
     files = sorted([fn for fn in os.listdir(dir)
                     if fn.endswith('.fits') and identifier in fn])
     print('Selecting the following files:')
     for fn in files:
         print(r'%s%s' % (dir, fn))
-    return {slabmodel(dir+fn).trans: slabmodel(dir+fn) for fn in files}
+    return {slabmodel(dir+fn).trans: slabmodel(dir+fn, noise=noise,
+                                               vcorr=vcorr)
+            for fn in files}

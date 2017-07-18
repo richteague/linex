@@ -20,7 +20,7 @@ warnings.simplefilter("ignore")
 
 class diskglobal:
 
-    def __init__(self, name, dir='./', bins=None, molecule='cs'):
+    def __init__(self, name, dir='./', bins=None, molecule='cs', noise=None):
         """Read in and prepare the disk model dictionary."""
         self.dir = dir
         self.name = name
@@ -33,6 +33,7 @@ class diskglobal:
             bins = np.linspace(10., 180., 18)
         self.rvals, self.spectra = self.averagespectra(bins=bins, nbins=None)
         self.mu = self.rates.mu
+        self.noise = noise
         return
 
     def readfrequency(self, path):
@@ -82,18 +83,23 @@ class diskglobal:
     def getdic(self, radius):
         """Returns a dictionary of the spectra at the given radius."""
         ridx = abs(self.rvals-radius).argmin()
-        return {t: diskmodel(self.spectra[i][ridx], self.velaxs[i], self.mu)
-                for i, t in enumerate(self.trans)}
+        return {t: diskmodel(self.spectra[i][ridx], self.velaxs[i], self.mu,
+                             self.noise) for i, t in enumerate(self.trans)}
 
 
 class diskmodel:
 
-    def __init__(self, spectrum, velax, mu=44.):
+    def __init__(self, spectrum, velax, mu=44., noise=None):
         self.velax = velax
         self.spectrum = spectrum
         self.p0 = self.fitGaussian()
         self.x0, self.dx, self.Tb = self.p0
         self.mu = mu
+        if noise is not None:
+            if noise > 0.1:
+                print("Noise is greater than 10%, are you sure?")
+            noise *= self.Tb * np.random.randn(self.spectrum.size)
+        self.spectrum += noise
         return
 
     def fitGaussian(self):
@@ -104,7 +110,9 @@ class diskmodel:
         return x0, dx, Tb
 
 
-def diskdictionary(identifier, radius, dir='./', molecule='cs', bins=None):
+def diskdictionary(identifier, radius, dir='./', molecule='cs',
+                   bins=None, noise=None):
     """Return a dictionary for fitter.py."""
-    dg = diskglobal(name=identifier, dir=dir, bins=bins, molecule=molecule)
+    dg = diskglobal(name=identifier, dir=dir, bins=bins,
+                    molecule=molecule, noise=noise)
     return dg.getdic(radius)

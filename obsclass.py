@@ -18,8 +18,8 @@ warnings.simplefilter("ignore")
 
 class obsglobal:
 
-    def __init__(self, name, **kwargs):
-        self.verbose = kwargs.get('verbose', False)
+    def __init__(self, name, noise=None, **kwargs):
+        self.verbose = kwargs.get('verbose', True)
         self.dir = kwargs.get('dir', './')
         self.name = name
         self.molecule = kwargs.get('molecule', 'cs')
@@ -34,12 +34,13 @@ class obsglobal:
         self.spectra = [d[2] for d in self.datas]
         self.trans = [self.findtransitions(fn) for fn in self.files]
         self.mu = kwargs.get('mu', 44.)
+        self.noise = noise
         return
 
     def findfiles(self):
         """Find the approrpriate files."""
         files = sorted([self.dir + fn for fn in os.listdir(self.dir)
-                        if fn.endswith('average.npy')
+                        if fn.endswith('.npy')
                         and self.name in fn])
         if self.verbose:
             print('Selecting the following files:')
@@ -49,9 +50,9 @@ class obsglobal:
 
     def findtransitions(self, path):
         """Read in the CS transitions."""
-        if '76' in path:
+        if '_6_' in path:
             return 6
-        elif '54' in path:
+        elif '_4_' in path:
             return 4
         else:
             return 2
@@ -61,18 +62,23 @@ class obsglobal:
         ridx = abs(self.radii - radius).argmin()
         if self.verbose:
             print('Requested %.3f", found %.3f".' % (radius, self.radii[ridx]))
-        return {t: obsmodel(self.spectra[i][ridx], self.velaxs[i], self.mu)
-                for i, t in enumerate(self.trans)}
+        return {t: obsmodel(self.spectra[i][ridx], self.velaxs[i], self.mu,
+                            self.noise) for i, t in enumerate(self.trans)}
 
 
 class obsmodel:
 
-    def __init__(self, spectrum, velax, mu=44.):
+    def __init__(self, spectrum, velax, mu=44., noise=None):
         self.velax = velax
         self.spectrum = spectrum
         self.p0 = self.fitGaussian()
         self.x0, self.dx, self.Tb = self.p0
         self.mu = mu
+        if noise is not None:
+            if noise > 0.1:
+                print("Noise is greater than 10%, are you sure?")
+            noise *= self.Tb * np.random.randn(self.spectrum.size)
+        self.spectrum += noise
         return
 
     def fitGaussian(self):
@@ -83,7 +89,7 @@ class obsmodel:
         return x0, dx, Tb
 
 
-def obsdictionary(identifier, radius, dir='./', molecule='cs'):
+def obsdictionary(identifier, radius, dir='./', molecule='cs', noise=None):
     """Return a dictionary for fitter.py."""
-    og = obsglobal(name=identifier, dir=dir, molecule=molecule)
+    og = obsglobal(name=identifier, dir=dir, molecule=molecule, noise=noise)
     return og.getdict(radius)
