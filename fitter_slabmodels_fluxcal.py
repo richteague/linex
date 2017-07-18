@@ -37,20 +37,12 @@ class fitdict:
             self.plotlines()
         return
 
-    def _lnprob(self, theta):
+    def _lnprob(self, theta, fc=0.0):
         """Log-probability function."""
         lnp = self._lnprior(theta)
         if not np.isfinite(lnp):
             return -np.inf
-        return self._lnlike(theta)
-
-    def _lnx2(self, modelspectra):
-        """Log-Chi-squared function."""
-        lnx2 = []
-        for s, dy, y in zip(self.spectra, self.rms, modelspectra):
-            dlnx2 = ((s - y) / dy)**2 + np.log(dy**2 * np.sqrt(2. * np.pi))
-            lnx2.append(-0.5 * np.nansum(dlnx2))
-        return np.nansum(lnx2)
+        return self._lnlike(theta, fc)
 
     def _lnprior(self, theta):
         """
@@ -85,7 +77,7 @@ class fitdict:
         x0s = [t[j] for j in -(np.arange(len(self.trans)) + 3)[::-1]]
         return t[0], t[1], t[2], t[3], x0s, t[-2], t[-1]
 
-    def _lnlike(self, theta):
+    def _lnlike(self, theta, fc=0.0):
         """Log-likelihood for fitting peak brightness."""
         temp, dens, sigma, mach, x0s, vamp, vcorr = self._parse(theta)
         toiter = zip(self.trans, self.velaxs, x0s)
@@ -96,7 +88,7 @@ class fitdict:
         for k, velax, dy in zip(noises, self.velaxs, self.rms):
             k.compute(velax, dy)
         for k, mod, obs in zip(noises, models, self.spectra):
-            lnx2 += k.lnlikelihood(mod - obs)
+            lnx2 += k.lnlikelihood(mod * (1. + fc * np.random.randn()) - obs)
         return lnx2
 
     def _spectrum(self, j, t, d, s, x, x0, mach):
@@ -109,16 +101,18 @@ class fitdict:
         """Run emcee fitting just the profile peaks."""
 
         # Default values for the MCMC fitting.
+
         nwalkers = kwargs.get('nwalkers', 200)
         nburnin = kwargs.get('nburnin', 500)
         nsteps = kwargs.get('nsteps', 500)
 
         # Set up the parameters and the sampler. Should allow for any multiple
         # of spectra to be simultaneously fit.
+
         self.params = ['temp', 'dens', 'sigma', 'mach']
         for i in range(len(self.trans)):
             self.params += ['x0_%d' % i]
-        self.params += ['logRMS', 'logR']
+        self.params += ['var', 'logR']
         ndim = len(self.params)
 
         # For the sampling, we first sample the whole parameter space. After
@@ -143,7 +137,13 @@ class fitdict:
         pos = pos[np.argmax(lp)] + 1e-4 * np.random.randn(nwalkers, ndim)
         sampler.reset()
 
+        # To speed up the initial burn-in, we only apply flux calibration
+        # uncertainties in the second call of the sampler. This rescales the
+        # model spectra by some fraction before calling the chi-squared
+        # likelihood.
+
         print("Running second burn-in...")
+        sampler.args = (kwargs.get('fluxcal', 0.0))
         pos, _, _ = sampler.run_mcmc(pos, nburnin+nsteps)
         return sampler, sampler.flatchain
 
