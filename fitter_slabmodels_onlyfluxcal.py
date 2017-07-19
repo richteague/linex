@@ -12,12 +12,10 @@ Input:
 """
 
 import emcee
-import george
 import numpy as np
 import scipy.constants as sc
 from linex.radexgridclass import radexgrid
 import matplotlib.pyplot as plt
-from george.kernels import ExpSquaredKernel as ExpSq
 
 
 class fitdict:
@@ -37,12 +35,21 @@ class fitdict:
             self.plotlines()
         return
 
-    def _lnprob(self, theta, fc=0.0):
+    def _lnprob(self, theta, fluxcal=0.0):
         """Log-probability function."""
         lnp = self._lnprior(theta)
         if not np.isfinite(lnp):
             return -np.inf
-        return self._lnlike(theta, fc)
+        return self._lnlike(theta, fluxcal)
+
+    def _lnx2(self, modelspectra, fluxcal=0.0):
+        """Log-Chi-squared function."""
+        lnx2 = []
+        for s, dy, y in zip(self.spectra, self.rms, modelspectra):
+            dlnx2 = (((s - y * (1. + fluxcal * np.random.randn()))) / dy)**2
+            dlnx2 += np.log(dy**2 * np.sqrt(2. * np.pi))
+            lnx2.append(-0.5 * np.nansum(dlnx2))
+        return np.nansum(lnx2)
 
     def _lnprior(self, theta):
         """
@@ -51,7 +58,7 @@ class fitdict:
         number can be any positive value less than one. The range of widths
         allowed by the radexgrid should cover everything up to M = 1.
         """
-        temp, dens, sigma, mach, x0s, vamp, vcorr = self._parse(theta)
+        temp, dens, sigma, mach, x0s = self._parse(theta)
         if not self.grid.in_grid(temp, 'temp'):
             return -np.inf
         if not self.grid.in_grid(dens, 'dens'):
@@ -63,33 +70,20 @@ class fitdict:
                 return -np.inf
         if abs(mach) > 0.5:
             return -np.inf
-
-        # Hyper-parameters for the noise model.
-
-        if not 0. < vamp < 0.1:
-            return -np.inf
-        if not -5. < vcorr < 0.:
-            return -np.inf
         return 0.0
 
-    def _parse(self, t):
+    def _parse(self, theta):
         """Parses theta values given self.params."""
-        x0s = [t[j] for j in -(np.arange(len(self.trans)) + 3)[::-1]]
-        return t[0], t[1], t[2], t[3], x0s, t[-2], t[-1]
+        x0s = [theta[j] for j in -(np.arange(len(self.trans)) + 1)[::-1]]
+        return theta[0], theta[1], theta[2], theta[3], x0s
 
-    def _lnlike(self, theta, fc=0.0):
+    def _lnlike(self, theta, fluxcal=0.0):
         """Log-likelihood for fitting peak brightness."""
-        temp, dens, sigma, mach, x0s, vamp, vcorr = self._parse(theta)
+        temp, dens, sigma, mach, x0s = self._parse(theta)
         toiter = zip(self.trans, self.velaxs, x0s)
-        models = [self._spectrum(j, temp, dens, sigma, v, x0, mach)
-                  for j, v, x0 in toiter]
-        lnx2 = 0.0
-        noises = [george.GP(vamp * ExpSq(10**vcorr)) for dy in self.rms]
-        for k, velax, dy in zip(noises, self.velaxs, self.rms):
-            k.compute(velax, dy)
-        for k, mod, obs in zip(noises, models, self.spectra):
-            lnx2 += k.lnlikelihood(mod * (1. + fc * np.random.randn()) - obs)
-        return lnx2
+        spectra = [self._spectrum(j, temp, dens, sigma, v, x0, mach)
+                   for j, v, x0 in toiter]
+        return self._lnx2(np.squeeze(spectra), fluxcal)
 
     def _spectrum(self, j, t, d, s, x, x0, mach):
         """Returns a spectrum on the provided velocity axis."""
@@ -101,24 +95,20 @@ class fitdict:
         """Run emcee fitting just the profile peaks."""
 
         # Default values for the MCMC fitting.
-
         nwalkers = kwargs.get('nwalkers', 200)
         nburnin = kwargs.get('nburnin', 500)
         nsteps = kwargs.get('nsteps', 500)
 
         # Set up the parameters and the sampler. Should allow for any multiple
         # of spectra to be simultaneously fit.
-
         self.params = ['temp', 'dens', 'sigma', 'mach']
         for i in range(len(self.trans)):
             self.params += ['x0_%d' % i]
-        self.params += ['var', 'logR']
         ndim = len(self.params)
 
         # For the sampling, we first sample the whole parameter space. After
         # the burn-in phase, we recenter the walkers around the median value in
         # each parameter and start from there.
-
         sampler = emcee.EnsembleSampler(nwalkers, ndim, self._lnprob)
         pos = [self.grid.random_samples(p.split('_')[0], nwalkers)
                for p in self.params if p.split('_')[0] in self.grid.parameters]
@@ -126,25 +116,15 @@ class fitdict:
         for i in range(len(self.trans)):
             pos += [np.zeros(nwalkers)]
 
-        # Hyper-parameters for the noise model. 'vamp' is the variance of the
-        # noise while 'vcorr' is the correlation length.
-
-        pos += [np.mean(self.rms)**2 + np.random.randn(nwalkers)]
-        pos += [np.random.uniform(-4, -1, nwalkers)]
-
         print("Running first burn-in...")
         pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin)
-        pos = pos[np.argmax(lp)] + 1e-4 * np.random.randn(nwalkers, ndim)
+        pos = pos[np.argmax(lp)] + 1e-1 * np.random.randn(nwalkers, ndim)
 
-        # To speed up the initial burn-in, we only apply flux calibration
-        # uncertainties in the second call of the sampler. This rescales the
-        # model spectra by some fraction before calling the chi-squared
-        # likelihood.
-
-        print("Running second burn-in...")
+        print("Running second burn-in with fluxcal uncertainties...")
         sampler = emcee.EnsembleSampler(nwalkers, ndim, self._lnprob,
                                         args=[kwargs.get('fluxcal', 0.0)])
-        sampler.run_mcmc(pos, nburnin+nsteps)
+        pos, _, _ = sampler.run_mcmc(pos, nburnin+nsteps)
+
         if kwargs.get('plotsamples', True):
             self.plotsampling(sampler, kwargs.get('color', 'dodgerblue'))
         return sampler, sampler.flatchain
@@ -156,7 +136,7 @@ class fitdict:
         if ax is None:
             fig, ax = plt.subplots()
         for i, t in enumerate(self.trans):
-            ax.plot(self.velaxs[i], self.spectra[i], lw=1.25,
+            ax.step(self.velaxs[i], self.spectra[i], lw=1.25,
                     label=r'J = %d - %d' % (t+1, t))
         ax.set_xlabel('Velocity [km/s]')
         ax.set_ylabel('Brightness [K]')
@@ -181,7 +161,7 @@ class fitdict:
             l, m, h = np.percentile(samples, [16, 50, 84], axis=1)
             mm = np.mean(m)
             ax.axhline(mm, color='w', ls='--')
-            ax.plot(l, color=color, lw=1.0)
+            ax.plot(l, color=color, lw=0.5)
             ax.plot(m, color=color, lw=1.0)
             ax.plot(h, color=color, lw=0.5)
 
