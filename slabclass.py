@@ -110,10 +110,13 @@ class slabmodel:
         return T / np.pi / dpix / dpix
 
 
-def slabdictionary(identifier='', dir='./', noise=None, vcorr=None):
+def slabdictionary(identifier='', dir='./', noise=None,
+                   vcorr=None, trans=None):
     """Returns a dictionary of slab models for the fitter."""
     files = sorted([fn for fn in os.listdir(dir)
                     if fn.endswith('.fits') and identifier in fn])
+    if trans is not None:
+        files = sorted([fn for fn in files if float(fn[7]) in trans])
     print('Selecting the following files:')
     for fn in files:
         print(r'%s%s' % (dir, fn))

@@ -11,6 +11,7 @@ Input:
 
 """
 
+import time
 import emcee
 import numpy as np
 import scipy.constants as sc
@@ -68,7 +69,7 @@ class fitdict:
         for x0, velax in zip(x0s, self.velaxs):
             if x0 < velax[0] or x0 > velax[-1]:
                 return -np.inf
-        if abs(mach) > 0.5:
+        if not 0.0 <= mach < 0.5:
             return -np.inf
         return 0.0
 
@@ -112,19 +113,25 @@ class fitdict:
         sampler = emcee.EnsembleSampler(nwalkers, ndim, self._lnprob)
         pos = [self.grid.random_samples(p.split('_')[0], nwalkers)
                for p in self.params if p.split('_')[0] in self.grid.parameters]
-        pos += [np.random.uniform(0.0, 1.0, nwalkers)]
+        pos += [np.random.uniform(0.0, 0.5, nwalkers)]
         for i in range(len(self.trans)):
             pos += [np.zeros(nwalkers)]
 
         print("Running first burn-in...")
         pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin)
-        pos = pos[np.argmax(lp)] + 1e-1 * np.random.randn(nwalkers, ndim)
+        pos = pos[np.argmax(lp)] + 1e-3 * np.random.randn(nwalkers, ndim)
 
-        print("Running second burn-in with fluxcal uncertainties...")
+        if kwargs.get('fluxcal', 0.0) > 0.0:
+            print("Running second burn-in with fluxcal uncertainties...")
+        else:
+            print("Running second burn-in...")
+
         sampler = emcee.EnsembleSampler(nwalkers, ndim, self._lnprob,
                                         args=[kwargs.get('fluxcal', 0.0)])
+        t0 = time.time()
         pos, _, _ = sampler.run_mcmc(pos, nburnin+nsteps)
 
+        print("Run complete in %s." % self.timeformat(time.time() - t0))
         if kwargs.get('plotsamples', True):
             self.plotsampling(sampler, kwargs.get('color', 'dodgerblue'))
         return sampler, sampler.flatchain
@@ -152,10 +159,7 @@ class fitdict:
 
             # Plot the individual walkers.
             for walker in samples.T:
-                if param == 'mach':
-                    ax.plot(abs(walker), alpha=0.075, color='k')
-                else:
-                    ax.plot(walker, alpha=0.075, color='k')
+                ax.plot(walker, alpha=0.075, color='k')
 
             # Plot the percentiles.
             l, m, h = np.percentile(samples, [16, 50, 84], axis=1)
@@ -203,3 +207,9 @@ class fitdict:
         """Returns the percentiles in a [<y>, -dy, +dy] format."""
         pcnts = self.samples2percentiles(samples)
         return np.array([[p[1], p[1]-p[0], p[2]-p[1]] for p in pcnts])
+
+    def timeformat(self, time):
+        """Returns nicely formatted time."""
+        m, s = divmod(time, 60)
+        h, m = divmod(m, 60)
+        return "%d:%02d:%02d" % (h, m, s)

@@ -131,6 +131,8 @@ class fitdict:
 
         print("Running second burn-in...")
         pos, _, _ = sampler.run_mcmc(pos, nburnin+nsteps)
+        if kwargs.get('plotsamples', True):
+            self.plotsampling(sampler, kwargs.get('color', 'dodgerblue'))
         return sampler, sampler.flatchain
 
     # General Functions.
@@ -145,6 +147,41 @@ class fitdict:
         ax.set_xlabel('Velocity [km/s]')
         ax.set_ylabel('Brightness [K]')
         ax.legend(frameon=False)
+        return
+
+    def plotsampling(self, sampler, color='dodgerblue'):
+        """Plot the sampling."""
+
+        # Loop through each of the parameters and plot their sampling.
+        for param, samples in zip(self.params, sampler.chain.T):
+            fig, ax = plt.subplots()
+
+            # Make sure we take the absolute Mach value.
+            # if param == 'mach':
+            #     samples = abs(samples)
+
+            # Plot the individual walkers.
+            for walker in samples.T:
+                ax.plot(walker, alpha=0.075, color='k')
+
+            # Plot the percentiles.
+            l, m, h = np.percentile(samples, [16, 50, 84], axis=1)
+            mm = np.mean(m)
+            ax.axhline(mm, color='w', ls='--')
+            ax.plot(l, color=color, lw=1.0)
+            ax.plot(m, color=color, lw=1.0)
+            ax.plot(h, color=color, lw=0.5)
+
+            # Rescale the axes to make everything visible.
+            ll = mm - l[-1]
+            hh = mm - h[-1]
+            yy = max(ll, hh)
+            ax.set_ylim(mm - 3.5 * yy, mm + 3.5 * yy)
+            ax.set_xlim(0, m.size)
+
+            # Axis labels.
+            ax.set_xlabel(r'$N_{\rm steps}$')
+            ax.set_ylabel(r'${\rm %s}$' % param)
         return
 
     def thermalwidth(self, T):
