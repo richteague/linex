@@ -57,7 +57,6 @@ class slabmodel:
                 kern = george.kernels.Matern52Kernel(vcorr / 1e3)
                 kern = george.GP((noise * self.Tb)**2 * kern)
                 self.spectrum += kern.sample(self.velax)
-                print("Assuming a correlation of %.2g m/s." % vcorr)
         return
 
     def fitGaussian(self):

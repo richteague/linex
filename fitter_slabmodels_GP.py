@@ -46,9 +46,7 @@ class fitdict:
         self.rms = np.array(self.rms)
         print("Estimated RMS of each line:")
         for j, sig in zip(self.trans, self.rms):
-            print("\tJ = %d - %d: %.1f mK" % (j+1, j, 1e3 * sig))
-        for Tb, sig in zip(self.peaks, self.rms):
-            print("%.3f" % (sig / Tb))
+            print("  J = %d - %d: %.1f mK" % (j+1, j, 1e3 * sig))
 
         # Plot the read in lines to check everything looks OK.
         if kwargs.get('plot', False):
@@ -77,7 +75,7 @@ class fitdict:
             return -np.inf
         if not self.grid.in_grid(sigma, 'sigma'):
             return -np.inf
-        if abs(mach) > 0.5:
+        if not 0.0 <= mach < 0.5:
             return -np.inf
 
         # Line profiles and noise.
@@ -134,7 +132,9 @@ class fitdict:
         """
 
         # Default values for the MCMC fitting.
-        # We find that nsteps = 1000 is probably better for more consistency.
+        # Timing values:
+        #   3 lines: 200 walkers, 500 steps takes: 2m34s.
+        #   3 lines: 500 walkers, 500 steps takes: 8m34s.
 
         nwalkers = kwargs.get('nwalkers', 200)
         nburnin = kwargs.get('nburnin', 500)
@@ -200,9 +200,9 @@ class fitdict:
                             self.spectra[i] + 3.0 * self.rms[i],
                             lw=0.0, alpha=0.2, color=l[0].get_color(),
                             zorder=-3)
-        ax.set_xlabel('Velocity [km/s]')
-        ax.set_ylabel('Brightness [K]')
-        ax.legend(frameon=False)
+        ax.set_xlabel(r'${\rm Velocity \quad (km s^{-1})}$')
+        ax.set_ylabel(r'${\rm Brightness \quad (K)}$')
+        ax.legend(frameon=False, markerfirst=False)
         return
 
     def plotsampling(self, sampler, color='dodgerblue'):
@@ -237,18 +237,18 @@ class fitdict:
         return
 
     def thermalwidth(self, T):
-        """Thermal Doppler width [km/s]."""
-        return np.sqrt(2. * sc.k * T / self.mu / sc.m_p) / 1e3
+        """Thermal Doppler width [m/s]."""
+        return np.sqrt(2. * sc.k * T / self.mu / sc.m_p)
 
     def soundspeed(self, T):
-        """Soundspeed of gas [km/s]."""
-        return np.sqrt(sc.k * T / 2.34 / sc.m_p) / 1e3
+        """Soundspeed of gas [m/s]."""
+        return np.sqrt(sc.k * T / 2.34 / sc.m_p)
 
     def linewidth(self, T, Mach):
         """Standard deviation of line, dV [km/s]."""
         v_therm = self.thermalwidth(T)
         v_turb = Mach * self.soundspeed(T)
-        return np.hypot(v_therm, v_turb) / np.sqrt(2)
+        return np.hypot(v_therm, v_turb) / np.sqrt(2) / 1e3
 
     def gaussian(self, x, x0, dx, A):
         """Gaussian function. dx is the standard deviation."""
