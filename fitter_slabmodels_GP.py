@@ -25,6 +25,14 @@ import matplotlib.pyplot as plt
 
 class fitdict:
 
+    B0 = 2.449913e10
+    nu = {2: 146.9690287e9,
+          4: 244.9355565e9,
+          6: 342.8828503}
+    gu = {2: 7.,
+          4: 11.,
+          6: 15.}
+
     def __init__(self, dic, gridpath, **kwargs):
         """
         Fit the slab models.
@@ -53,14 +61,14 @@ class fitdict:
             self.plotlines()
         return
 
-    def _lnprob(self, theta):
+    def _lnprob(self, theta, fluxcal=0.0):
         """
         Log-probability function.
         """
         lnp = self._lnprior(theta)
         if not np.isfinite(lnp):
             return -np.inf
-        return self._lnlike(theta)
+        return self._lnlike(theta, fluxcal)
 
     def _lnprior(self, theta):
         """
@@ -98,21 +106,18 @@ class fitdict:
         cor = [t[i] for i in idxs]
         return t[0], t[1], t[2], t[3], x0s, sig, cor
 
-    def _lnlike(self, theta):
+    def _lnlike(self, theta, fluxcal=0.0):
         """
         Log-likelihood for fitting peak brightness.
         """
-        temp, dens, sigma, mach, x0s, sig2, corr = self._parse(theta)
-
+        t, d, s, m, x0s, sig2, corr = self._parse(theta)
         toiter = zip(self.trans, self.velaxs, x0s)
-        models = [self._spectrum(j, temp, dens, sigma, v, x, mach)
-                  for j, v, x in toiter]
+        models = [self._spectrum(j, t, d, s, v, x, m) for j, v, x in toiter]
+        models = [mod * (1. + fluxcal * np.random.randn()) for mod in models]
         toiter = zip(sig2, corr, self.spectra)
-        noises = [george.GP(s * ExpSq(10**c), mean=np.mean(y), fit_mean=True)
-                  for s, c, y in toiter]
+        noises = [george.GP(s * ExpSq(10**c)) for sig, c, y in toiter]
         for k, velax, dy in zip(noises, self.velaxs, self.rms):
             k.compute(velax, dy)
-
         lnx2 = 0.0
         for k, mod, obs in zip(noises, models, self.spectra):
             lnx2 += k.lnlikelihood(mod - obs)
@@ -133,8 +138,9 @@ class fitdict:
 
         # Default values for the MCMC fitting.
         # Timing values:
-        #   3 lines: 200 walkers, 500 steps takes: 2m34s.
-        #   3 lines: 500 walkers, 500 steps takes: 8m34s.
+        #   3 lines: 200 walkers, 500 steps takes:  2m34s.
+        #   3 lines: 500 walkers, 500 steps takes:  8m34s.
+        #   3 lines: 200 walkers, 1000 steps takes: 7m49s.
 
         nwalkers = kwargs.get('nwalkers', 200)
         nburnin = kwargs.get('nburnin', 500)
@@ -175,6 +181,8 @@ class fitdict:
 
         print("Running productions...")
         t0 = time.time()
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, self._lnprob,
+                                        args=[kwargs.get('fluxcal', 0.0)])
         pos, _, _ = sampler.run_mcmc(pos, nsteps)
         print("Production complete in %s." % self.hmsformat(time.time()-t0))
 
@@ -185,6 +193,34 @@ class fitdict:
         return sampler, sampler.flatchain
 
     # General Functions.
+
+    def fluxcal_uncertainties(self, fluxcal, samples):
+        """
+        Calculates the uncertainties from the flux calibration.
+        """
+        dT = self.fluxcal_temperature(fluxcal, np.median(samples[0]))
+        dN = self.fluxcal_columndensity(fluxcal)
+        return dT, dN
+
+    def fluxcal_temperature(self, fluxcal, T):
+        """
+        Estimate the error on temperature from flux calibration uncertainties.
+        """
+        dT = sc.k / sc.h / self.B0 / self.partition_function(T)
+        dT = [dT - sc.h * self.nu[j] / sc.k / T**2 for j in self.trans]
+        return fluxcal / max(dT)
+
+    def fluxcal_columndensity(self, fluxcal):
+        """
+        Estimate the error on the log column density from flux calibration.
+        """
+        return 0.434 * fluxcal
+
+    def partition_function(self, T):
+        """
+        Partition function for CS. Values from JPL.
+        """
+        return sc.k * T / sc.h / self.B0 + 1. / 3.
 
     def plotlines(self, ax=None):
         """
@@ -235,6 +271,17 @@ class fitdict:
             ax.set_xlabel(r'$N_{\rm steps}$')
             ax.set_ylabel(r'${\rm %s}$' % param)
         return
+
+    def linewidth_uncertainty(self, samples):
+        """
+        Returns the linewidth uncertaity [km/s].
+        """
+        unc = self.samples2uncertainties(samples)
+        T, dT = unc[0, 0], np.average(unc[0, 1:])
+        M, dM = unc[3, 0], np.average(unc[3, 1:])
+        dV = self.linewidth(T, M) * np.sqrt(2) * 1e3
+        cs = self.soundspeed(T)
+        return ((dT * dV / 2. / T) + (dM * M * cs**2 / dV)) / 1e3
 
     def thermalwidth(self, T):
         """Thermal Doppler width [m/s]."""
