@@ -36,9 +36,9 @@ def runRADEX(species, widths, temperatures, densities, columns, **kwargs):
     # This is hardwired to where the collisional rates are.
 
     rates_path = os.getenv('RADEX_DATAPATH')
-    if not os.path.isfile('{}{}.dat'.format(rates_path, species)):
+    if not os.path.isfile('{}/{}.dat'.format(rates_path, species)):
         raise ValueError('Not found collisional rates.')
-    rates = ratefile('{}{}.dat'.format(rates_path, species))
+    rates = ratefile('{}/{}.dat'.format(rates_path, species))
 
     # We assume that the density is n(H2) and the ortho/para ratio is 3.
     # Check if oH2 and pH2 are valid colliders in the collisional rate file.
