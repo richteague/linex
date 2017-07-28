@@ -18,7 +18,7 @@ warnings.simplefilter("ignore")
 
 class obsglobal:
 
-    def __init__(self, name, noise=None, **kwargs):
+    def __init__(self, name, **kwargs):
         self.verbose = kwargs.get('verbose', True)
         self.dir = kwargs.get('dir', './')
         self.name = name
@@ -34,7 +34,6 @@ class obsglobal:
         self.spectra = [d[2] for d in self.datas]
         self.trans = [self.findtransitions(fn) for fn in self.files]
         self.mu = kwargs.get('mu', 44.)
-        self.noise = noise
         return
 
     def findfiles(self):
@@ -74,11 +73,6 @@ class obsmodel:
         self.p0 = self.fitGaussian()
         self.x0, self.dx, self.Tb = self.p0
         self.mu = mu
-        if noise is not None:
-            if noise > 0.1:
-                print("Noise is greater than 10%, are you sure?")
-            noise *= self.Tb * np.random.randn(self.spectrum.size)
-        self.spectrum += noise
         return
 
     def fitGaussian(self):
@@ -89,7 +83,7 @@ class obsmodel:
         return x0, dx, Tb
 
 
-def obsdictionary(identifier, radius, dir='./', molecule='cs', noise=None):
+def obsdictionary(identifier, radius, dir='./', molecule='cs'):
     """Return a dictionary for fitter.py."""
-    og = obsglobal(name=identifier, dir=dir, molecule=molecule, noise=noise)
+    og = obsglobal(name=identifier, dir=dir, molecule=molecule)
     return og.getdict(radius)
