@@ -61,13 +61,13 @@ class obsglobal:
         ridx = abs(self.radii - radius).argmin()
         if self.verbose:
             print('Requested %.3f", found %.3f".' % (radius, self.radii[ridx]))
-        return {t: obsmodel(self.spectra[i][ridx], self.velaxs[i], self.mu,
-                            self.noise) for i, t in enumerate(self.trans)}
+        return {t: obsmodel(self.spectra[i][ridx], self.velaxs[i], self.mu)
+                for i, t in enumerate(self.trans)}
 
 
 class obsmodel:
 
-    def __init__(self, spectrum, velax, mu=44., noise=None):
+    def __init__(self, spectrum, velax, mu=44.):
         self.velax = velax
         self.spectrum = spectrum
         self.p0 = self.fitGaussian()
