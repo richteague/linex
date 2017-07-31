@@ -27,10 +27,13 @@ class obsglobal:
         self.datas = [np.load(fn) for fn in self.files]
         self.velaxs = np.squeeze([d[0] for d in self.datas])
         self.radii = np.squeeze([d[1] for d in self.datas])
-        if not (self.radii == self.radii[0]).all():
+
+        # Check that the radial points of each transition are the same. 
+        if not all([np.array_equal(r, self.radii[0]) for r in self.radii]):
             raise ValueError('Mismatched radial sampling.')
         else:
             self.radii = np.unique(self.radii)
+
         self.spectra = [d[2] for d in self.datas]
         self.trans = [self.findtransitions(fn) for fn in self.files]
         self.mu = kwargs.get('mu', 44.)
@@ -39,8 +42,7 @@ class obsglobal:
     def findfiles(self):
         """Find the approrpriate files."""
         files = sorted([self.dir + fn for fn in os.listdir(self.dir)
-                        if fn.endswith('.npy')
-                        and self.name in fn])
+                        if fn.endswith('.npy') and self.name in fn])
         if self.verbose:
             print('Selecting the following files:')
             for fn in files:
@@ -49,9 +51,9 @@ class obsglobal:
 
     def findtransitions(self, path):
         """Read in the CS transitions."""
-        if '_6_' in path:
+        if '_76_' in path:
             return 6
-        elif '_4_' in path:
+        elif '_54_' in path:
             return 4
         else:
             return 2
