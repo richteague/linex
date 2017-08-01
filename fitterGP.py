@@ -98,7 +98,7 @@ class fitdict:
 
     def _parse(self, t):
         """Parses theta values given self.params."""
-        idxs = -np.arange(1, 4)[::-1] * self.ntrans
+        idxs = 4 + np.arange(self.ntrans) * 3
         x0s = [t[i] for i in idxs]
         idxs += 1
         sig = [t[i] for i in idxs]
@@ -163,9 +163,9 @@ class fitdict:
         sampler = emcee.EnsembleSampler(nwalkers, ndim, self._lnprob)
         pos = [self.grid.random_samples(p.split('_')[0], nwalkers)
                for p in self.params if p.split('_')[0] in self.grid.parameters]
-        pos += [np.random.uniform(0.0, 1.0, nwalkers)]
+        pos += [np.random.uniform(0.0, 0.5, nwalkers)]
         for i in range(len(self.trans)):
-            pos += [np.zeros(nwalkers)]
+            pos += [np.zeros(nwalkers) + 1e-2 * np.random.randn(nwalkers)]
             pos += [self.rms[i]**2 + 1e-4 * np.random.randn(nwalkers)]
             pos += [np.random.uniform(-3, -1, nwalkers)]
 
