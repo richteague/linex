@@ -74,7 +74,39 @@ class fitdict:
         else:
             self.lnprob = self._lnprobX2
 
+        # Writ a list of the free parameters which we will fit.
+        self.singlemach = kwargs.get('singlemach', True)
+        self._popparams()
+
         return
+
+    def _popparams(self):
+        """Populates the free variables and the number of dimensions."""
+        self.params = ['temp', 'dens', 'sigma']
+        if self.singlemach:
+            self.params += ['mach']
+        else:
+            if self.verbose:
+                print("Fitting individual non-thermal width components.")
+            for i in range(len(self.trans)):
+                self.params += ['mach_%d' % i]
+        for i in range(len(self.trans)):
+            self.params += ['x0_%d' % i]
+            if self.GP:
+                self.params += ['sig_%d' % i, 'vcorr_%d' % i]
+        self.ndim = len(self.params)
+        return
+
+    def _parse(self, theta):
+        """Parses theta values from self.params."""
+        zipped = zip(theta, self.params)
+        mach = [t for t, n in zipped if 'mach' in n]
+        x0s = [t for t, n in zipped if 'x0_' in n]
+        if self.GP:
+            sigs = [t for t, n in zipped if 'sig_' in n]
+            corrs = [t for t, n in zipped if 'vcorr_' in n]
+            return theta[0], theta[1], theta[2], mach, x0s, sigs, corrs
+        return theta[0], theta[1], theta[2], mach, x0s
 
     # Fitting with standard chi-squared likelihood function.
 
@@ -87,24 +119,20 @@ class fitdict:
             return -np.inf
         return self._lnlikeX2(theta)
 
-    def _parseX2(self, t):
-        """Parses theta values given self.params."""
-        return t[0], t[1], t[2], t[3], t[4:]
-
     def _lnpriorX2(self, theta):
         """
         Log-prior function.
         """
-        temp, dens, sigma, mach, x0s = self._parseX2(theta)
+        temp, dens, sigma, mach, x0s = self._parse(theta)
         if not self.grid.in_grid(temp, 'temp'):
             return -np.inf
         if not self.grid.in_grid(dens, 'dens'):
             return -np.inf
         if not self.grid.in_grid(sigma, 'sigma'):
             return -np.inf
-        if not 0.0 <= mach < 0.5:
+        if not all([0.0 < m < 0.5 for m in mach]):
             return -np.inf
-        if not all([x > v[0] or x < v[-1] for x, v in zip(x0s, self.velaxs)]):
+        if not all([v[0] < x < v[-1] for x, v in zip(x0s, self.velaxs)]):
             return -np.inf
         return 0.0
 
@@ -112,15 +140,14 @@ class fitdict:
         """
         Log-likelihood with chi-squared likelihood function.
         """
-        t, d, s, m, x0s = self._parseX2(theta)
-        toiter = zip(self.trans, self.velaxs, x0s)
-        models = [self._spectrum(j, t, d, s, v, x, m) for j, v, x in toiter]
+        temp, dens, sigma, mach, x0s = self._parse(theta)
+        models = [self._spectrum(self.trans[i], temp, dens, sigma,
+                                 self.velaxs[i], x0s[i], mach[i % len(mach)])
+                  for i in range(self.ntrans)]
         return self._chisquared(models)
 
     def _chisquared(self, models):
-        """
-        Chi-squared likelihoo function.
-        """
+        """Chi-squared likelihoo function."""
         lnx2 = []
         for s, dy, y in zip(self.spectra, self.rms, models):
             dlnx2 = ((s - y) / dy)**2 + np.log(dy**2 * np.sqrt(2. * np.pi))
@@ -130,57 +157,37 @@ class fitdict:
     # Fitting with Gaussian processes (via George) to model the noise.
 
     def _lnprobGP(self, theta):
-        """
-        Log-probability function.
-        """
+        """Log-probability function."""
         lnp = self._lnpriorGP(theta)
         if not np.isfinite(lnp):
             return -np.inf
         return self._lnlikeGP(theta)
 
     def _lnpriorGP(self, theta):
-        """
-        Log-prior function.
-        """
-        temp, dens, sigma, mach, x0s, sig2, corr = self._parseGP(theta)
-
-        # Excitation conditions.
+        """Log-prior function."""
+        temp, dens, sigma, mach, x0s, sig2, corr = self._parse(theta)
         if not self.grid.in_grid(temp, 'temp'):
             return -np.inf
         if not self.grid.in_grid(dens, 'dens'):
             return -np.inf
         if not self.grid.in_grid(sigma, 'sigma'):
             return -np.inf
-        if not 0.0 <= mach < 0.5:
+        if not all([0.0 <= m < 0.5 for m in mach]):
             return -np.inf
-
-        # Line profiles and noise.
-        if not all([x > v[0] or x < v[-1] for x, v in zip(x0s, self.velaxs)]):
+        if not all([v[0] < x < v[-1] for x, v in zip(x0s, self.velaxs)]):
             return -np.inf
         if not all([0. < s < 0.1 for s in sig2]):
             return -np.inf
         if not all([-15. < c < 0. for c in corr]):
             return -np.inf
-
         return 0.0
 
-    def _parseGP(self, t):
-        """Parses theta values given self.params."""
-        idxs = 4 + np.arange(self.ntrans) * 3
-        x0s = [t[i] for i in idxs]
-        idxs += 1
-        sig = [t[i] for i in idxs]
-        idxs += 1
-        cor = [t[i] for i in idxs]
-        return t[0], t[1], t[2], t[3], x0s, sig, cor
-
     def _lnlikeGP(self, theta):
-        """
-        Log-likelihood with correlated noise.
-        """
-        t, d, s, m, x0s, sig2, corr = self._parseGP(theta)
-        toiter = zip(self.trans, self.velaxs, x0s)
-        models = [self._spectrum(j, t, d, s, v, x, m) for j, v, x in toiter]
+        """Log-likelihood with correlated noise."""
+        temp, dens, sigma, mach, x0s, sig2, corr = self._parseGP(theta)
+        models = [self._spectrum(self.trans[i], temp, dens, sigma,
+                                 self.velaxs[i], x0s[i], mach[i % len(mach)])
+                  for i in range(self.ntrans)]
         noises = [george.GP(v**2 * ExpSq(10**c)) for v, c in zip(sig2, corr)]
         for k, velax, dy in zip(noises, self.velaxs, self.rms):
             k.compute(velax, dy)
@@ -190,6 +197,20 @@ class fitdict:
         return lnx2
 
     # Wrapper for MCMC fitting (via emcee).
+
+    def _startingpositions(self, nwalkers):
+        """Return random starting positions."""
+        pos = [self.grid.random_samples('temp', nwalkers)]
+        pos += [self.grid.random_samples('dens', nwalkers)]
+        pos += [self.grid.random_samples('sigma', nwalkers)]
+        pos += [np.random.uniform(0.0, 0.5, nwalkers)
+                for p in self.params if 'mach' in p]
+        for i in range(self.ntrans):
+            pos += [1e-2 * np.random.randn(nwalkers)]
+            if self.GP:
+                pos += [self.rms[i]**2 + 1e-4 * np.random.randn(nwalkers)]
+                pos += [np.random.uniform(-3, -1, nwalkers)]
+        return pos
 
     def emcee(self, **kwargs):
         """
@@ -206,38 +227,21 @@ class fitdict:
         nburnin = kwargs.get('nburnin', 500)
         nsteps = kwargs.get('nsteps', 500)
 
-        # Set up the parameters and the sampler. Should allow for any multiple
-        # of spectra to be simultaneously fit.
-
-        self.params = ['temp', 'dens', 'sigma', 'mach']
-        for i in range(len(self.trans)):
-            self.params += ['x0_%d' % i]
-            if self.GP:
-                self.params += ['sig_%d' % i, 'vcorr_%d' % i]
-        ndim = len(self.params)
-
         # For the sampling, we first sample the whole parameter space. After
         # the burn-in phase, we recenter the walkers around the median value in
         # each parameter and start from there. For noise parameters we sample
         # around the estimated RMS value and assume a correlation ranging
         # between 1 m/s and 100 m/s.
 
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, self.lnprob)
-        pos = [self.grid.random_samples(p.split('_')[0], nwalkers)
-               for p in self.params if p.split('_')[0] in self.grid.parameters]
-        pos += [np.random.uniform(0.0, 0.5, nwalkers)]
-        for i in range(len(self.trans)):
-            pos += [np.zeros(nwalkers) + 1e-2 * np.random.randn(nwalkers)]
-            if self.GP:
-                pos += [self.rms[i]**2 + 1e-4 * np.random.randn(nwalkers)]
-                pos += [np.random.uniform(-3, -1, nwalkers)]
+        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.lnprob)
+        pos = self._startingpositions(nwalkers)
 
         # Run the two burn-in periods and then one major one.
         t0 = time.time()
         if self.verbose:
             print("Running first burn-in...")
         pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin)
-        pos = pos[np.argmax(lp)] + 1e-4 * np.random.randn(nwalkers, ndim)
+        pos = pos[np.argmax(lp)] + 1e-4 * np.random.randn(nwalkers, self.ndim)
         sampler.reset()
 
         if self.verbose:
@@ -246,7 +250,7 @@ class fitdict:
 
         if self.verbose:
             print("Running productions...")
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, self.lnprob)
+        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self.lnprob)
         pos, _, _ = sampler.run_mcmc(pos, nsteps)
 
         if self.verbose:
