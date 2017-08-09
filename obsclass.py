@@ -72,6 +72,7 @@ def readtrans(path):
     else:
         raise ValueError("Cannot parse filename.")
 
+
 class obsglobal:
 
     def __init__(self, name, trans=None, **kwargs):
@@ -148,7 +149,9 @@ class obsmodel:
         return x0, dx, Tb
 
 
-def obsdictionary(identifier, radius, dir='./', molecule='cs', trans=None):
+def obsdictionary(identifier, radius, dir='./', molecule='cs', trans=None,
+                  verbose=True):
     """Return a dictionary for fitter.py."""
-    og = obsglobal(name=identifier, dir=dir, molecule=molecule, trans=trans)
+    og = obsglobal(name=identifier, dir=dir, molecule=molecule, trans=trans,
+                   verbose=verbose)
     return og.getdict(radius)
