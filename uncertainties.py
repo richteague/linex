@@ -76,11 +76,27 @@ def nonthermalwidth(M, T):
     return M * soundspeed(T)
 
 
+def uncertainty_nonthermalwidth(M, dM, T, dT):
+    """Uncertainty in non-thermal Doppler width [m/s]."""
+    
+    return
+
+
 def thermalwidth(T):
     """Thermal Doppler width [m/s]."""
     return np.sqrt(2. * sc.k * T / mu / sc.m_p)
 
 
+def uncertainty_thermalwidth(T, dT):
+    """Uncertainty in thermal Doppler width [m/s]."""
+    return 0.5 * dT * np.sqrt(2 * sc.k / mu / sc.m_p / T)
+
+
 def soundspeed(T):
     """Soundspeed of gas [m/s]."""
     return np.sqrt(sc.k * T / 2.34 / sc.m_p)
+
+
+def uncertainty_soundspeed(T, dT):
+    """Uncertainty in soundspeed of the gas [m/s]."""
+    return 0.5 * dT * np.sqrt(sc.k / 2.34 / sc.m_p / T)

@@ -43,6 +43,7 @@ class fitdict:
         self.ntrans = len(self.trans)
         self.peaks = [self.dic[k].Tb for k in self.trans]
         self.widths = [self.dic[k].dx for k in self.trans]
+        self.centers = [self.dic[k].x0 for k in self.trans]
         self.velaxs = [self.dic[k].velax for k in self.trans]
         self.spectra = [self.dic[k].spectrum for k in self.trans]
         self.mu = self.dic[self.trans[0]].mu
@@ -54,8 +55,10 @@ class fitdict:
 
         # Estimate the noise from the channels far from the line centre. Note
         # that these values are only used as starting values for the fitting.
-        self.rms = [np.nanstd(self.spectra[k][abs(self.velaxs[k]) > 0.5])
-                    for k in range(len(self.trans))]
+        self.rms = []
+        for k in range(self.ntrans):
+            mask = abs(self.velaxs[k] - self.centers[k]) > 1.0
+            self.rms += [np.nanstd(self.spectra[k][mask])]
         self.rms = np.array(self.rms)
         if self.verbose:
             print("Estimated RMS of each line:")
@@ -140,7 +143,7 @@ class fitdict:
         else:
             if not all([0.0 < m < 0.5 for m in mach]):
                 return -np.inf
-        if not all([v[0] < x < v[-1] for x, v in zip(x0s, self.velaxs)]):
+        if not all([min(v) < x < max(v) for x, v in zip(x0s, self.velaxs)]):
             return -np.inf
         return 0.0
 
@@ -222,7 +225,7 @@ class fitdict:
             pos += [np.random.uniform(0.0, 0.5, nwalkers)
                     for p in self.params if 'mach' in p]
         for i in range(self.ntrans):
-            pos += [1e-2 * np.random.randn(nwalkers)]
+            pos += [self.centers[i] + 1e-2 * np.random.randn(nwalkers)]
             if self.GP:
                 pos += [self.rms[i]**2 + 1e-4 * np.random.randn(nwalkers)]
                 pos += [np.random.uniform(-3, -1, nwalkers)]
