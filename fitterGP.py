@@ -48,6 +48,10 @@ class fitdict:
         self.mu = self.dic[self.trans[0]].mu
         self.verbose = kwargs.get('verbose', True)
 
+        self.logmach = kwargs.get('logmach', False)
+        if self.verbose and self.logmach:
+            print("Fitting for log-Mach.")
+
         # Estimate the noise from the channels far from the line centre. Note
         # that these values are only used as starting values for the fitting.
         self.rms = [np.nanstd(self.spectra[k][abs(self.velaxs[k]) > 0.5])
@@ -130,8 +134,12 @@ class fitdict:
             return -np.inf
         if not self.grid.in_grid(sigma, 'sigma'):
             return -np.inf
-        if not all([0.0 < m < 0.5 for m in mach]):
-            return -np.inf
+        if self.logmach:
+            if not all([-5.0 < m < -0.3 for m in mach]):
+                return -np.inf
+        else:
+            if not all([0.0 < m < 0.5 for m in mach]):
+                return -np.inf
         if not all([v[0] < x < v[-1] for x, v in zip(x0s, self.velaxs)]):
             return -np.inf
         return 0.0
@@ -172,8 +180,12 @@ class fitdict:
             return -np.inf
         if not self.grid.in_grid(sigma, 'sigma'):
             return -np.inf
-        if not all([0.0 <= m < 0.5 for m in mach]):
-            return -np.inf
+        if self.logmach:
+            if not all([-5.0 < m < -0.3 for m in mach]):
+                return -np.inf
+        else:
+            if not all([0.0 < m < 0.5 for m in mach]):
+                return -np.inf
         if not all([v[0] < x < v[-1] for x, v in zip(x0s, self.velaxs)]):
             return -np.inf
         if not all([0. < s < 0.1 for s in sig2]):
@@ -184,7 +196,7 @@ class fitdict:
 
     def _lnlikeGP(self, theta):
         """Log-likelihood with correlated noise."""
-        temp, dens, sigma, mach, x0s, sig2, corr = self._parseGP(theta)
+        temp, dens, sigma, mach, x0s, sig2, corr = self._parse(theta)
         models = [self._spectrum(self.trans[i], temp, dens, sigma,
                                  self.velaxs[i], x0s[i], mach[i % len(mach)])
                   for i in range(self.ntrans)]
@@ -203,8 +215,12 @@ class fitdict:
         pos = [self.grid.random_samples('temp', nwalkers)]
         pos += [self.grid.random_samples('dens', nwalkers)]
         pos += [self.grid.random_samples('sigma', nwalkers)]
-        pos += [np.random.uniform(0.0, 0.5, nwalkers)
-                for p in self.params if 'mach' in p]
+        if self.logmach:
+            pos += [np.random.uniform(-5, -1, nwalkers)
+                    for p in self.params if 'mach' in p]
+        else:
+            pos += [np.random.uniform(0.0, 0.5, nwalkers)
+                    for p in self.params if 'mach' in p]
         for i in range(self.ntrans):
             pos += [1e-2 * np.random.randn(nwalkers)]
             if self.GP:
@@ -269,31 +285,12 @@ class fitdict:
         """
         Returns a spectrum on the provided velocity axis.
         """
-        dV = self.linewidth(t, mach)
+        if self.logmach:
+            dV = self.linewidth(t, np.power(10, mach))
+        else:
+            dV = self.linewidth(t, mach)
         A = self.grid.intensity(j, dV, t, d, s)
         return self.gaussian(x, x0, dV, A)
-
-    def fluxcal_uncertainties(self, fluxcal, T):
-        """
-        Calculates the uncertainties from the flux calibration.
-        """
-        dT = self.fluxcal_temperature(fluxcal, T)
-        dN = self.fluxcal_columndensity(fluxcal)
-        return dT, dN
-
-    def fluxcal_temperature(self, fluxcal, T):
-        """
-        Estimate the error on temperature from flux calibration uncertainties.
-        """
-        dT = sc.k / sc.h / self.B0 / self.partition_function(T)
-        dT = [dT - sc.h * self.nu[j] / sc.k / T**2 for j in self.trans]
-        return fluxcal / max(dT)
-
-    def fluxcal_columndensity(self, fluxcal):
-        """
-        Estimate the error on the log column density from flux calibration.
-        """
-        return 0.434 * fluxcal
 
     def partition_function(self, T):
         """
