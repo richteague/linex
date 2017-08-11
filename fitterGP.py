@@ -57,7 +57,7 @@ class fitdict:
         # that these values are only used as starting values for the fitting.
         self.rms = []
         for k in range(self.ntrans):
-            mask = abs(self.velaxs[k] - self.centers[k]) > 1.0
+            mask = abs(self.velaxs[k] - self.centers[k]) > 0.5
             self.rms += [np.nanstd(self.spectra[k][mask])]
         self.rms = np.array(self.rms)
         if self.verbose:
