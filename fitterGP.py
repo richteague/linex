@@ -49,12 +49,30 @@ class fitdict:
         self.mu = self.dic[self.trans[0]].mu
         self.verbose = kwargs.get('verbose', True)
 
+        # Control the type of turbulence we want to model.
+
+        self.laminar = kwargs.get('laminar', False)
+        if self.laminar and self.verbose:
+            print("Assuming only thermal broadening.")
+
         self.logmach = kwargs.get('logmach', False)
-        if self.verbose and self.logmach:
+        if self.logmach and self.verbose:
             print("Fitting for log-Mach.")
+
+        if self.logmach and self.laminar:
+            self.logmach = False
+            if self.verbose:
+                print("Model is laminar, reverting from log-Mach.")
+
+        self.singlemach = kwargs.get('singlemach', True)
+        if self.laminar:
+            self.singlemach = True
+        if not self.singlemach and self.verbose:
+            print("Allowing individual non-thermal components.")
 
         # Estimate the noise from the channels far from the line centre. Note
         # that these values are only used as starting values for the fitting.
+
         self.rms = []
         for k in range(self.ntrans):
             mask = abs(self.velaxs[k] - self.centers[k]) > 0.5
@@ -82,7 +100,6 @@ class fitdict:
             self.lnprob = self._lnprobX2
 
         # Writ a list of the free parameters which we will fit.
-        self.singlemach = kwargs.get('singlemach', True)
         self._popparams()
 
         return
@@ -101,13 +118,18 @@ class fitdict:
             self.params += ['x0_%d' % i]
             if self.GP:
                 self.params += ['sig_%d' % i, 'vcorr_%d' % i]
+        if self.laminar:
+            self.params = [p for p in self.params if 'mach' not in p]
         self.ndim = len(self.params)
         return
 
     def _parse(self, theta):
         """Parses theta values from self.params."""
         zipped = zip(theta, self.params)
-        mach = [t for t, n in zipped if 'mach' in n]
+        if not self.laminar:
+            mach = [t for t, n in zipped if 'mach' in n]
+        else:
+            mach = [0.0]
         x0s = [t for t, n in zipped if 'x0_' in n]
         if self.GP:
             sigs = [t for t, n in zipped if 'sig_' in n]
@@ -141,7 +163,7 @@ class fitdict:
             if not all([-5.0 < m < -0.3 for m in mach]):
                 return -np.inf
         else:
-            if not all([0.0 < m < 0.5 for m in mach]):
+            if not all([0.0 <= m < 0.5 for m in mach]):
                 return -np.inf
         if not all([min(v) < x < max(v) for x, v in zip(x0s, self.velaxs)]):
             return -np.inf
@@ -218,12 +240,13 @@ class fitdict:
         pos = [self.grid.random_samples('temp', nwalkers)]
         pos += [self.grid.random_samples('dens', nwalkers)]
         pos += [self.grid.random_samples('sigma', nwalkers)]
-        if self.logmach:
-            pos += [np.random.uniform(-5, -1, nwalkers)
-                    for p in self.params if 'mach' in p]
-        else:
-            pos += [np.random.uniform(0.0, 0.5, nwalkers)
-                    for p in self.params if 'mach' in p]
+        if not self.laminar:
+            if self.logmach:
+                pos += [np.random.uniform(-5, -1, nwalkers)
+                        for p in self.params if 'mach' in p]
+            else:
+                pos += [np.random.uniform(0.0, 0.5, nwalkers)
+                        for p in self.params if 'mach' in p]
         for i in range(self.ntrans):
             pos += [self.centers[i] + 1e-2 * np.random.randn(nwalkers)]
             if self.GP:
@@ -232,9 +255,7 @@ class fitdict:
         return pos
 
     def emcee(self, **kwargs):
-        """
-        Run emcee.
-        """
+        """Run emcee."""
 
         # Default values for the MCMC fitting.
         # Timing values:
@@ -280,31 +301,49 @@ class fitdict:
 
         if kwargs.get('plotsamples', True):
             self.plotsampling(sampler, kwargs.get('color', 'dodgerblue'))
+            ax = self.plotlines()
+            self.plotbestfit(sampler, ax=ax)
         return sampler, sampler.flatchain
 
     # General Functions.
 
     def _spectrum(self, j, t, d, s, x, x0, mach):
-        """
-        Returns a spectrum on the provided velocity axis.
-        """
+        """Returns a spectrum on the provided velocity axis."""
         if self.logmach:
             dV = self.linewidth(t, np.power(10, mach))
         else:
             dV = self.linewidth(t, mach)
+        # Distinguish here intrinsic and observed profile width.
         A = self.grid.intensity(j, dV, t, d, s)
         return self.gaussian(x, x0, dV, A)
 
     def partition_function(self, T):
-        """
-        Partition function for CS. Values from JPL.
-        """
+        """Partition function for CS. Values from JPL."""
         return sc.k * T / sc.h / self.B0 + 1. / 3.
 
+    def plotbestfit(self, sampler, ax=None):
+        """Plot the best-fit spectra."""
+        if ax is None:
+            fig, ax = plt.subplots()
+        models = self.bestfitmodels(sampler)
+        for x, y, J in zip(self.velaxs, models, self.trans):
+            ax.plot(x, y, ls='--', color='r')
+        ax.legend(fontsize=6)
+        return ax
+
+    def bestfitmodels(self, sampler):
+        """Returns the best fit models."""
+        theta = np.median(sampler.flatchain, axis=0)
+        if self.GP:
+            temp, dens, sigma, mach, x0s, _, _ = self._parse(theta)
+        else:
+            temp, dens, sigma, mach, x0s = self._parse(theta)
+        return [self._spectrum(self.trans[i], temp, dens, sigma,
+                               self.velaxs[i], x0s[i], mach[i % len(mach)])
+                for i in range(self.ntrans)]
+
     def plotlines(self, ax=None):
-        """
-        Plot the emission lines which are to be fit.
-        """
+        """Plot the emission lines which are to be fit."""
         if ax is None:
             fig, ax = plt.subplots()
         for i, t in enumerate(self.trans):
@@ -318,12 +357,10 @@ class fitdict:
         ax.set_xlabel(r'${\rm Velocity \quad (km s^{-1})}$')
         ax.set_ylabel(r'${\rm Brightness \quad (K)}$')
         ax.legend(frameon=False, markerfirst=False)
-        return
+        return ax
 
     def plotsampling(self, sampler, color='dodgerblue'):
-        """
-        Plot the sampling.
-        """
+        """Plot the sampling."""
 
         # Loop through each of the parameters and plot their sampling.
         for param, samples in zip(self.params, sampler.chain.T):
@@ -354,9 +391,7 @@ class fitdict:
         return
 
     def linewidth_uncertainty(self, samples):
-        """
-        Returns the linewidth uncertaity [km/s].
-        """
+        """Returns the linewidth uncertaity [km/s]."""
         unc = self.samples2uncertainties(samples)
         T, dT = unc[0, 0], np.average(unc[0, 1:])
         M, dM = unc[3, 0], np.average(unc[3, 1:])

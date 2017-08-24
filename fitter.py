@@ -1,315 +1,421 @@
 """
 Class to fit slab models with a single temperature and density. Assume that
-the free parameers are {Tkin, nH2, NCS, M, x0, x1, x2, N} where N are the hyper
-parameters associated with the noise kernel.
+the excitation conditions are {Tkin, nH2, NCS, M}. In addition, each line has
+the parameters {x0_i, var_i, vcorr_i} which specify the line centre, the
+variance of the noise and the correlation of the noise. Thus for N lines we
+have 4 + 3N free parameters.
 
-While flux calibration uncertainty can be accounted for, we do not apply that
-to the spectra. That must be included beforehand.
-
-I think N should just be the width of the correlator but in principle this
-should be able to be fit for and then averaged over.
-
+Is there a way to implement this for N lines? Or do I have to hardcode it all?
 
 Input:
-    dic - dictionary of spectra.
+    dic - slab dictionary of spectra from slabclass.py.
     gridpath - path to the pre-calculated intensities.
-    rms - list of the RMS values for the spectra in [K].
-    fluxcal - list of the flux calibration uncertainties in [%].
+
 """
 
+import time
 import emcee
+import george
+import corner
 import numpy as np
 import scipy.constants as sc
 from linex.radexgridclass import radexgrid
+from george.kernels import ExpSquaredKernel as ExpSq
 import matplotlib.pyplot as plt
 
 
 class fitdict:
 
-    def __init__(self, dic, gridpath, rms=None, fluxcal=None, **kwargs):
+    B0 = 2.449913e10
+    nu = {2: 146.9690287e9,
+          4: 244.9355565e9,
+          6: 342.8828503}
+    gu = {2: 7.,
+          4: 11.,
+          6: 15.}
+
+    def __init__(self, dic, gridpath, **kwargs):
         """Fit the slab models."""
+
         self.dic = dic
+        self.grid = radexgrid(gridpath)
+
+        # If verbose, print what's going on. If diagnostics is true, plot
+        # several diagnostic plots: burn-in plots, samples, posterior corner
+        # plots and best-fit models overlaid on observations.
+
+        self.verbose = kwargs.get('verbose', True)
+        self.diagnostics = kwargs.get('diagnostics', True)
+
+        # Read in the models and their simple-fit values for estimating noise.
+        # Everything should be ordered in the lower energy transitions first.
+
         self.trans = sorted([k for k in self.dic.keys()])
-        self.peaks = [self.dic[k].Tb for k in self.trans]
-        self.widths = [self.dic[k].dx for k in self.trans]
+        self.ntrans = len(self.trans)
+        self.Tbs = [self.dic[k].Tb for k in self.trans]
+        self.dxs = [self.dic[k].dx for k in self.trans]
+        self.x0s = [self.dic[k].x0 for k in self.trans]
         self.velaxs = [self.dic[k].velax for k in self.trans]
         self.spectra = [self.dic[k].spectrum for k in self.trans]
-        self.grid = radexgrid(gridpath)
         self.mu = self.dic[self.trans[0]].mu
-        self.params = []
 
-        # Flux calibration is specified as a percentage of the peak value.
+        # Control the type of turbulence we want to model.
+        # If laminar, don't assume any turbulent broadening.
+        # If logmach, fit log(M) rather than M. This is better for limits.
+        # If singlemach, assume a common non-thermal broadening term.
+        # If vbeam > 0.0, include an additional broadening term to the profile.
 
-        self.fluxcal = fluxcal
-        if self.fluxcal.size == 1:
-            self.fluxcal = np.squeeze([self.fluxcal for p in self.peaks])
+        self.laminar = kwargs.get('laminar', False)
+        if self.laminar and self.verbose:
+            print("Assuming only thermal broadening.")
 
-        # The RMS noise is in the same units as the spectrum, [K]. If none are
-        # specified then they are estimated from regions that are 3sigma away
-        # from the line center.
+        self.logmach = kwargs.get('logmach', False)
+        if self.logmach and self.verbose:
+            print("Fitting for log-Mach.")
 
-        self.rms = rms
-        if self.rms is None:
-            rms = []
-            for i, t in enumerate(self.trans):
-                dx = self.widths[i]
-                velo = self.velaxs[i]
-                spec = self.spectra[i]
-                x0 = velo[abs(spec).argmax()]
-                rms.append(np.nanstd(spec[abs(velo-x0) > 3. * dx]))
-            self.rms = np.squeeze(rms)
-        elif self.rms.size == 1:
-                self.rms = np.squeeze([self.rms for p in self.peaks])
-        elif self.rms.size != self.trans.size:
-                raise ValueError('Wrong number of RMS values given.')
+        if self.logmach and self.laminar:
+            self.logmach = False
+            if self.verbose:
+                print("Model is laminar, reverting from log-Mach.")
 
-        # Plot the lines to show what we are fitting. This allows a quick check
-        # that everything is running OK.
+        self.vbeam = kwargs.get('vbeam', 0.0)
+        if self.vbeam > 0.0 and self.verbose:
+            print("Assuming v_beam = %.0f m/s." % self.vbeam)
+            print("Change this at any time through 'self.vbeam'.")
 
-        if kwargs.get('plot', False):
-            self.plotlines()
+        self.singlemach = kwargs.get('singlemach', True)
+        if self.laminar:
+            self.singlemach = True
+        if not self.singlemach and self.verbose:
+            print("Allowing individual non-thermal components.")
+
+        self.lte = kwargs.get('lte', kwargs.get('LTE', False))
+        if self.lte and self.verbose:
+            print("Assuming LTE.")
+
+        # Estimate the noise from the channels far from the line centre. Note
+        # that these values are only used as starting values for the fitting.
+
+        self.rms = self._estimatenoise()
+
+        # Check if we want to include Gaussian processes to model the noise.
+        # If we don't use it, the fitting is much quicker as we just use a more
+        # simple chi-squared approach.
+
+        self.GP = kwargs.get('GP', False)
+        if self.GP and self.verbose:
+                print("Using Gaussian processes to model noise.")
+
+        # Writ a list of the free parameters which we will fit.
+        self._popparams()
 
         return
 
-    # MCMC Functions.
+    def _estimatenoise(self):
+        """Estimate the noise in each spectra."""
+        rms = []
+        for k in range(self.ntrans):
+            mask = abs(self.velaxs[k] - self.x0s[k]) > 0.5
+            rms += [np.nanstd(self.spectra[k][mask])]
+        rms = np.array(rms)
+        if self.verbose:
+            print("Estimated RMS of each line:")
+            for j, sig in zip(self.trans, rms):
+                print("  J = %d - %d: %.1f mK" % (j+1, j, 1e3 * sig))
+        return rms
+
+    def _popparams(self):
+        """Populates the free variables and the number of dimensions."""
+        if self.lte:
+            self.params = ['temp', 'sigma']
+        else:
+            self.params = ['temp', 'dens', 'sigma']
+        if self.singlemach:
+            self.params += ['mach']
+        else:
+            if self.verbose:
+                print("Fitting individual non-thermal width components.")
+            for i in range(len(self.trans)):
+                self.params += ['mach_%d' % i]
+        for i in range(len(self.trans)):
+            self.params += ['x0_%d' % i]
+            if self.GP:
+                self.params += ['sig_%d' % i, 'vcorr_%d' % i]
+        if self.laminar:
+            self.params = [p for p in self.params if 'mach' not in p]
+        self.ndim = len(self.params)
+        return
+
+    def _parse(self, theta):
+        """Parses theta into {temp, dens, sigma, mach, x0s, sigs, corrs}."""
+        zipped = zip(theta, self.params)
+        temp = theta[0]
+        if self.lte:
+            dens = self.grid.maxdens
+            sigma = theta[1]
+        else:
+            dens = theta[1]
+            sigma = theta[2]
+        if not self.laminar:
+            mach = [t for t, n in zipped if 'mach' in n]
+        else:
+            mach = [0.0]
+        x0s = [t for t, n in zipped if 'x0_' in n]
+        if self.GP:
+            sigs = [t for t, n in zipped if 'sig_' in n]
+            corrs = [t for t, n in zipped if 'vcorr_' in n]
+        else:
+            sigs = [np.nan for _ in range(self.ntrans)]
+            corrs = [np.nan for _ in range(self.ntrans)]
+        return temp, dens, sigma, mach, x0s, sigs, corrs
+
+    # Fitting with standard chi-squared likelihood function.
 
     def _lnprob(self, theta):
-        """Log-probability function."""
+        """Log-probability function with simple chi-squared likelihood."""
         lnp = self._lnprior(theta)
         if not np.isfinite(lnp):
             return -np.inf
         return self._lnlike(theta)
 
-    def _lnx2(self, modelspectra):
-        """Log-Chi-squared function."""
-        lnx2 = []
-        for i, mod in enumerate(modelspectra):
-            s = self.spectra[i]
-            dy = np.hypot(s * self.fluxcal[i], self.rms[i])
-            dlnx2 = ((s - mod) / dy)**2 + np.log(dy**2 * np.sqrt(2. * np.pi))
-            lnx2.append(-0.5 * np.nansum(dlnx2))
-        return np.nansum(lnx2)
-
     def _lnprior(self, theta):
-        """Log-prior function."""
+        """Log-prior function. Uninformative priors."""
+        temp, dens, sigma, mach, x0s, sigs, corrs = self._parse(theta)
 
-        tmin, tmax, dmin, dmax, sigma, x0s, Ms, dVs = self._parse(theta)
-
-        # Minimum and maximum gradients must be in order.
-
-        if tmin > tmax:
+        # Excitation parameters.
+        if not self.grid.in_grid(temp, 'temp'):
             return -np.inf
-        if dmin > dmax:
-            return -np.inf
-
-        # Temperature, density and line widths must be within the RADEX grid.
-        # Note that this means that the grid must be sufficiently broad to
-        # encompass all possible scenarios.
-
-        if not self.grid.in_grid(tmin, 'temp'):
-            return -np.inf
-        if not self.grid.in_grid(tmax, 'temp'):
-            return -np.inf
-        if not self.grid.in_grid(dmin, 'dens'):
-            return -np.inf
-        if not self.grid.in_grid(dmax, 'dens'):
+        if not self.grid.in_grid(dens, 'dens'):
             return -np.inf
         if not self.grid.in_grid(sigma, 'sigma'):
             return -np.inf
-        for dV in dVs:
-            if not self.grid.in_grid(dV, 'width'):
+
+        # Non-thermal broadening.
+        if self.logmach:
+            if not all([-5.0 < m < -0.3 for m in mach]):
+                return -np.inf
+        else:
+            if not all([0.0 <= m < 0.5 for m in mach]):
                 return -np.inf
 
-        # Line centre must be on the velocity axis while the non-thermal width
-        # must be positive.
-
-        for x0, velax in zip(x0s, self.velaxs):
-            if x0 < velax[0] or x0 > velax[-1]:
-                return -np.inf
-        if any([M < 0 for M in Ms]):
+        # Line centres.
+        if not all([min(v) < x < max(v) for x, v in zip(x0s, self.velaxs)]):
             return -np.inf
+
+        # Noise properties.
+        if self.GP:
+            if not all([0. < s < 0.1 for s in sigs]):
+                return -np.inf
+            if not all([-15. < c < 0. for c in corrs]):
+                return -np.inf
         return 0.0
 
-    def _parse(self, theta):
-        """Parses theta values given self.params."""
-
-        # Slab properties.
-        tidx = int('temp_max' in self.params)
-        didx = int('dens_max' in self.params)
-        tmin = theta[0]
-        tmax = theta[tidx]
-        # if all(['dens' not in p for p in self.params])
-        dmin = theta[1+tidx]
-        dmax = theta[1+tidx+didx]
-        sigma = theta[2+tidx+didx]
-
-        # Line properties. Spiecifed by a line centre, x0, and a Mach number
-        # describing the non-thermal broadening of the line. Note the returned
-        # value of self.linewidth is the standard deviation of the line.
-
-        x0s = [theta[i] for i in [-6, -4, -2]]
-        Ms = [theta[i] for i in [-5, -3, -1]]
-        dVs = [min([self.linewidth(tmin, M) for M in Ms]),
-               max([self.linewidth(tmax, M) for M in Ms])]
-
-        return tmin, tmax, dmin, dmax, sigma, x0s, Ms, dVs
-
-    def _lnlike(self, theta):
-        """Log-likelihood for fitting peak brightness."""
-
-        # Parse all the free parameters.
-        tmin, tmax, dmin, dmax, s, x0s, Ms, _ = self._parse(theta)
-
-        # Create the gradients in temperature and density.
-        tgrid = np.arange(tmin, tmax+1e-4, self.mindtemp)
-        if len(tgrid) > self.maxnslab:
-            tgrid = np.linspace(tmin, tmax, self.maxnslab)
-        dgrid = np.arange(dmin, dmax+1e-4, self.minddens)
-        if len(dgrid) > self.maxnslab:
-            dgrid = np.linspace(dmin, dmax, self.maxnslab)
-
-        # Build the models. Need to loop through each kinetic temperature and
-        # n(H2) value. Each time making sure to calculate the correct width.
-
-        toiter = zip(self.trans, self.velaxs, x0s, Ms)
-        spectra = [[self._spectrum(j, t, d, s, v, x0, M)
-                    for d in dgrid for t in tgrid] for j, v, x0, M in toiter]
-        spectra = np.squeeze(spectra)
-
-        if len(tgrid) > 1 or len(dgrid) > 1:
-            spectra = np.average(np.squeeze(spectra), axis=1)
-        return self._lnx2(self.addfluxcal(spectra, self.fluxcal))
+    def _calculatemodels(self, theta):
+        """Calculates the appropriate models."""
+        t, d, s, m, x, _, _ = self._parse(theta)
+        return [self._spectrum(j, t, d, s, v, x[i], m[i % len(m)])
+                for i, (j, v) in enumerate(zip(self.trans, self.velaxs))]
 
     def _spectrum(self, j, t, d, s, x, x0, mach):
         """Returns a spectrum on the provided velocity axis."""
-        dV = self.linewidth(t, mach)
-        A = self.grid.intensity(j, dV, t, d, s)
-        return self.gaussian(x, x0, dV, A)
+        vbeam = self.vbeam / self.soundspeed(t)
+        if self.logmach:
+            dV_int = self.linewidth(t, np.power(10, mach))
+            dV_obs = self.linewidth(t, np.power(10, mach) + vbeam)
+        else:
+            dV_int = self.linewidth(t, mach)
+            dV_obs = self.linewidth(t, mach + vbeam)
+        A = self.grid.intensity(j, dV_int, t, d, s)
+        return self.gaussian(x, x0, dV_obs, A)
+
+    def _lnlike(self, theta):
+        """Log-likelihood with chi-squared likelihood function."""
+        models = self._calculatemodels(theta)
+        if not self.GP:
+            return self._chisquared(models)
+        noises = self._calculatenoises(theta)
+        for k, x, dy in zip(noises, self.velaxs, self.rms):
+            k.compute(x, dy)
+        lnx2 = 0.0
+        for k, mod, obs in zip(noises, models, self.spectra):
+            lnx2 += k.lnlikelihood(mod - obs)
+        return lnx2
+
+    def _calculatenoises(self, theta):
+        """Return the noise models."""
+        _, _, _, _, _, sigs, corrs = self._parse(theta)
+        return [george.GP(s**2 * ExpSq(10**c)) for s, c in zip(sigs, corrs)]
+
+    def _chisquared(self, models):
+        """Chi-squared likelihoo function."""
+        lnx2 = []
+        for o, dy, y in zip(self.spectra, self.rms, models):
+            dlnx2 = ((o - y) / dy)**2 + np.log(dy**2 * np.sqrt(2. * np.pi))
+            lnx2.append(-0.5 * np.nansum(dlnx2))
+        return np.nansum(lnx2)
+
+    def _startingpositions(self, nwalkers):
+        """Return random starting positions."""
+
+        # Excitation conditions.
+        pos = [self.grid.random_samples('temp', nwalkers)]
+        if not self.lte:
+            pos += [self.grid.random_samples('dens', nwalkers)]
+        pos += [self.grid.random_samples('sigma', nwalkers)]
+
+        # Non-thermal broadening.
+        if not self.laminar:
+            if self.logmach:
+                pos += [np.random.uniform(-5, -1, nwalkers)
+                        for p in self.params if 'mach' in p]
+            else:
+                pos += [np.random.uniform(0.0, 0.5, nwalkers)
+                        for p in self.params if 'mach' in p]
+
+        # Individual line properties.
+        for i in range(self.ntrans):
+            pos += [self.x0s[i] + 1e-2 * np.random.randn(nwalkers)]
+            if self.GP:
+                pos += [self.rms[i]**2 + 1e-4 * np.random.randn(nwalkers)]
+                pos += [np.random.uniform(-3, -1, nwalkers)]
+        return pos
 
     def emcee(self, **kwargs):
-        """Run emcee fitting just the profile peaks."""
+        """Run emcee."""
 
-        # Default values for the MCMC fitting.
         nwalkers = kwargs.get('nwalkers', 200)
         nburnin = kwargs.get('nburnin', 500)
         nsteps = kwargs.get('nsteps', 500)
-        tgrad = kwargs.get('tgrad', False)
-        dgrad = kwargs.get('dgrad', False)
 
-        # Set up the parameters and the sampler.
-        self.params = []
-        if tgrad:
-            self.params += ['temp_min', 'temp_max']
+        # For the sampling, we first sample the whole parameter space. After
+        # the burn-in phase, we recenter the walkers around the median value in
+        # each parameter and start from there. For noise parameters we sample
+        # around the estimated RMS value and assume a correlation ranging
+        # between 1 m/s and 100 m/s.
+
+        pos = self._startingpositions(nwalkers)
+        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self._lnprob)
+
+        t0 = time.time()
+
+        if self.verbose:
+            print("Running first burn-in...")
+        pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin)
+        pos = pos[np.argmax(lp)] + 1e-4 * np.random.randn(nwalkers, self.ndim)
+        if self.diagnostics:
+            self.plotsampling(sampler, title='First Burn-In')
+        sampler.reset()
+
+        if self.verbose:
+            print("Running second burn-in...")
+        pos, _, _ = sampler.run_mcmc(pos, nburnin)
+        if self.diagnostics:
+            self.plotsampling(sampler, title='Second Burn-In')
+
+        if self.verbose:
+            print("Running productions...")
+        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self._lnprob)
+        pos, _, _ = sampler.run_mcmc(pos, nsteps)
+        if self.diagnostics:
+            self.plotsampling(sampler, title='Production')
+            ax = self.plotobservations()
+            self.plotbestfit(sampler, ax=ax)
+            self.plotcorner(sampler)
+
+        if self.verbose:
+            t = self.hmsformat(time.time()-t0)
+            print("Production complete in %s." % t)
+
+        return sampler, sampler.flatchain
+
+    def _calculatetheta(self, sampler, method='median'):
+        """Returns the best fit parameters given the provided method."""
+        if method.lower() == 'median':
+            return np.median(sampler.flatchain, axis=0)
+        elif method.lower() == 'mean':
+            return np.mean(sampler.flatchain, axis=0)
         else:
-            self.params += ['temp']
-        if dgrad:
-            self.params += ['dens_min', 'dens_max']
-        else:
-            self.params += ['dens']
-        self.params += ['sigma']
-        for i in range(len(self.trans)):
-            self.params += ['x0_%d' % i, 'mach_%d' % i]
-        ndim = len(self.params)
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, self._lnprob)
+            raise ValueError("Method must be 'median' or 'mean'.")
 
-        # If no p0 is specifed, we can run one with totally random starting
-        # positions. This will double the time it takes to run MCMC. When
-        # populating the initial starting positions, we can use the
-        # grid.random_samples() functionalilty for slab properties. For the
-        # line properties, we also assume small (< 200 m/s) non-thermal widths.
+    def plotbestfit(self, sampler, ax=None):
+        """Plot the best-fit spectra."""
+        if ax is None:
+            fig, ax = plt.subplots()
+        models = self._calculatemodels(self._calculatetheta(sampler))
+        for x, y, J in zip(self.velaxs, models, self.trans):
+            ax.plot(x, y, ls='--', color='r')
+        ax.legend(fontsize=6)
+        return ax
 
-        p0 = kwargs.get('p0', None)
-        if p0 is None:
-            print('Estimating p0. Will take twice as long...')
-            pos = [self.grid.random_samples(p.split('_')[0], nwalkers)
-                   for p in self.params
-                   if p.split('_')[0] in self.grid.parameters]
-            for i in range(len(self.trans)):
-                pos += [np.zeros(nwalkers)]
-                pos += [np.random.uniform(0.0, 0.2, nwalkers)]
-            sampler.run_mcmc(self.orderpos(pos), nburnin+nsteps)
-            samples = sampler.chain[:, nburnin:].reshape((-1, ndim)).T
-            p0 = [np.nanmedian(s) for s in samples]
-            print('Starting values are:')
-            for param, pp in zip(self.params, p0):
-                print('%s: %.2e' % (param, pp))
-        if len(p0) != ndim:
-            raise ValueError('Wrong number of starting positions.')
-
-        # Run the proper MCMC routine.
-
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, self._lnprob)
-        pos = [p0 + kwargs.get('scatter', 1e-2)*np.random.randn(ndim)
-               for i in range(nwalkers)]
-        sampler.run_mcmc(self.orderpos(pos), nburnin+nsteps)
-        samples = sampler.chain[:, nburnin:].reshape((-1, ndim))
-        return sampler, samples
-
-    # General Functions.
-
-    def plotlines(self, ax=None):
-        """Plot the emission lines."""
+    def plotobservations(self, ax=None):
+        """Plot the emission lines which are to be fit."""
         if ax is None:
             fig, ax = plt.subplots()
         for i, t in enumerate(self.trans):
-            ax.plot(self.velaxs[i], self.spectra[i], lw=1.25,
-                    label=r'J = %d - %d' % (t+1, t))
-        ax.set_xlabel('Velocity [km/s]')
-        ax.set_ylabel('Brightness [K]')
-        ax.legend(frameon=False)
+            l = ax.plot(self.velaxs[i], self.spectra[i], lw=1.25,
+                        label=r'J = %d - %d' % (t+1, t))
+            ax.fill_between(self.velaxs[i],
+                            self.spectra[i] - 3.0 * self.rms[i],
+                            self.spectra[i] + 3.0 * self.rms[i],
+                            lw=0.0, alpha=0.2, color=l[0].get_color(),
+                            zorder=-3)
+        ax.set_xlabel(r'${\rm Velocity \quad (km s^{-1})}$')
+        ax.set_ylabel(r'${\rm Brightness \quad (K)}$')
+        ax.legend(frameon=False, markerfirst=False)
+        return ax
+
+    def plotsampling(self, sampler, color='dodgerblue', title=None):
+        """Plot the sampling."""
+
+        # Loop through each of the parameters and plot their sampling.
+        for param, samples in zip(self.params, sampler.chain.T):
+            fig, ax = plt.subplots()
+
+            # Plot the individual walkers.
+            for walker in samples.T:
+                ax.plot(walker, alpha=0.075, color='k')
+
+            # Plot the percentiles.
+            l, m, h = np.percentile(samples, [16, 50, 84], axis=1)
+            mm = np.mean(m)
+            ax.axhline(mm, color='w', ls='--')
+            ax.plot(l, color=color, lw=1.0)
+            ax.plot(m, color=color, lw=1.0)
+            ax.plot(h, color=color, lw=0.5)
+
+            # Rescale the axes to make everything visible.
+            ll = mm - l[-1]
+            hh = mm - h[-1]
+            yy = max(ll, hh)
+            ax.set_ylim(mm - 3.5 * yy, mm + 3.5 * yy)
+            ax.set_xlim(0, m.size)
+
+            # Axis labels.
+            ax.set_xlabel(r'$N_{\rm steps}$')
+            ax.set_ylabel(r'${\rm %s}$' % param)
+            if title is not None:
+                ax.set_title(title)
         return
 
-    def orderpos(self, pos):
-        """Orders the minimum and maximum values as appropriate."""
-        pos = np.squeeze(pos)
-        if 'temp_min' in self.params:
-            tidx = 2
-            pos_a = np.amin(pos[:2], axis=0)
-            pos_b = np.amax(pos[:2], axis=0)
-            pos = np.vstack((pos_a, pos_b, pos[2:]))
-        else:
-            tidx = 1
-        if 'dens_min' in self.params:
-            pos_a = np.amin(pos[tidx:2+tidx], axis=0)
-            pos_b = np.amax(pos[tidx:2+tidx], axis=0)
-            pos = np.vstack((pos[:tidx], pos_a, pos_b, pos[2+tidx:]))
-        return self.rotatepos(pos)
-
-    def rotatepos(self, pos):
-        """Make sure the starting positions are the correct orientation."""
-        if pos.shape[0] < pos.shape[1]:
-            return pos.T
-        return pos
+    def plotcorner(self, sampler):
+        """Plot the corner plot."""
+        corner.corner(sampler.flatchain, labels=self.params,
+                      quantiles=[0.16, 0.5, 0.84], show_titles=True)
+        return
 
     def thermalwidth(self, T):
-        """Thermal Doppler width [km/s]."""
-        return np.sqrt(2. * sc.k * T / self.mu / sc.m_p) / 1e3
+        """Thermal Doppler width [m/s]."""
+        return np.sqrt(2. * sc.k * T / self.mu / sc.m_p)
 
     def soundspeed(self, T):
-        """Soundspeed of gas [km/s]."""
-        return np.sqrt(sc.k * T / 2.34 / sc.m_p) / 1e3
+        """Soundspeed of gas [m/s]."""
+        return np.sqrt(sc.k * T / 2.34 / sc.m_p)
 
     def linewidth(self, T, Mach):
         """Standard deviation of line, dV [km/s]."""
         v_therm = self.thermalwidth(T)
         v_turb = Mach * self.soundspeed(T)
-        return np.hypot(v_therm, v_turb) / np.sqrt(2)
-
-    def addfluxcal(self, spectra, fluxcal):
-        """Add flux calibration uncertainty to the spectra."""
-        if all(self.fluxcal == 0.0):
-            return spectra
-        toiter = zip(spectra, fluxcal)
-        fcspec = [s * (np.random.randn() * fc + 1.) for s, fc in toiter]
-        return np.squeeze(fcspec)
-
-    def addnoise(self, spectra, rms):
-        """Add noise to the spectra."""
-        if any(self.rms == 0.0):
-            raise ValueError('Must have non-zero noise.')
-        toiter = zip(spectra, rms)
-        nyspec = [s + (np.random.randn(s.size) * dT) for s, dT in toiter]
-        return np.squeeze(nyspec)
+        return np.hypot(v_therm, v_turb) / np.sqrt(2) / 1e3
 
     def gaussian(self, x, x0, dx, A):
         """Gaussian function. dx is the standard deviation."""
@@ -323,3 +429,9 @@ class fitdict:
         """Returns the percentiles in a [<y>, -dy, +dy] format."""
         pcnts = self.samples2percentiles(samples)
         return np.array([[p[1], p[1]-p[0], p[2]-p[1]] for p in pcnts])
+
+    def hmsformat(self, time):
+        """Returns nicely formatted time."""
+        m, s = divmod(time, 60)
+        h, m = divmod(m, 60)
+        return "%d:%02d:%02d" % (h, m, s)

@@ -78,8 +78,7 @@ def nonthermalwidth(M, T):
 
 def uncertainty_nonthermalwidth(M, dM, T, dT):
     """Uncertainty in non-thermal Doppler width [m/s]."""
-    
-    return
+    raise ValueError()
 
 
 def thermalwidth(T):
