@@ -316,12 +316,12 @@ class fitdict:
             print("Running productions...")
         sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self._lnprob)
         pos, _, _ = sampler.run_mcmc(pos, nsteps)
+
         if self.diagnostics:
             self.plotsampling(sampler, title='Production')
             ax = self.plotobservations()
             self.plotbestfit(sampler, ax=ax)
             self.plotcorner(sampler)
-
         if self.verbose:
             t = self.hmsformat(time.time()-t0)
             print("Production complete in %s." % t)
@@ -343,7 +343,7 @@ class fitdict:
             fig, ax = plt.subplots()
         models = self._calculatemodels(self._calculatetheta(sampler))
         for x, y, J in zip(self.velaxs, models, self.trans):
-            ax.plot(x, y, ls='--', color='r')
+            ax.scatter(x, y, color='r')
         ax.legend(fontsize=6)
         return ax
 

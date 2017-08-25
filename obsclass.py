@@ -80,10 +80,10 @@ class obsglobal:
         self.dir = kwargs.get('dir', './')
         self.name = name
         self.molecule = kwargs.get('molecule', 'cs')
-        self.files = self.findfiles(trans)
+        self.files = np.array([self.findfiles(trans)]).flatten()
         self.datas = [np.load(fn) for fn in self.files]
         self.velaxs = [d[0] for d in self.datas]
-        self.radii = [d[1] for d in self.datas]
+        self.radii = np.unique([d[1] for d in self.datas])
 
         # Check that the radial points of each transition are the same.
         if len(self.files) > 1:
@@ -94,7 +94,7 @@ class obsglobal:
             self.spectra = [d[2] for d in self.datas]
             self.trans = [self.findtransitions(fn) for fn in self.files]
         else:
-            self.spectra = self.datas[0][2]
+            self.spectra = [d[2] for d in self.datas]
             self.trans = [self.findtransitions(self.files[0])]
 
         self.mu = kwargs.get('mu', 44.)
