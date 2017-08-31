@@ -1,13 +1,23 @@
 """
 Script to generate a grid of brightness temperatures from RADEX for a
 specified slab model. Can either be called from the command line or
-externally as a function.
+externally as a function. Will return an array with the brightness temperaure,
+excitation temperature and optical depth.
 
-Timing seems to scale linearly.
-1e2 entries: 00:01
-1e3 entries: 00:19
-1e4 entries: 03:23
-1e5 entries: 32:43
+The shape of the saved array is:
+
+    arr[ntrans, [TB, Tex, tau], dV, Tkin, n(H2), N(mol)]
+
+where dV, Tkin, n(H2) and N(mol) are the specified arrays in the filename. We
+use the filename convention,
+
+    species_widths_temperatures_densities_columns.npy
+
+where each variable contains the three values,
+
+    minval_maxval_nvals,
+
+with number in the '%.2f' format. This will help with reading in the file.
 """
 
 import os
@@ -16,8 +26,6 @@ import time
 import pyradex
 import numpy as np
 from limepy.analysis.collisionalrates import ratefile
-
-# Suppress all the numerical warnings from pyradex.
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -56,15 +64,19 @@ def runRADEX(species, widths, temperatures, densities, columns, **kwargs):
     # Saves both the brightness temperature and optical depth.
 
     jmax = kwargs.get('jmax', 9) + 1
-    Tb = np.zeros((jmax, 2, wnum, tnum, dnum, cnum))
+    Tb = np.zeros((jmax, 3, wnum, tnum, dnum, cnum))
 
     # First initialise pyradex, then iterate through all the permutations.
+    # Select the correct escape problem geometry, by default we assume slab.
 
+    escapegeom = kwargs.pop('escapegeom', 'slab')
     radex = pyradex.Radex(species=species, temperature=temperatures[0],
                           density=densityDict(densities[0], opr, opr_flag),
-                          column=columns[0], deltav=widths[0], **kwargs)
+                          column=columns[0], deltav=widths[0],
+                          escapeProbGeom=escapegeom, **kwargs)
 
     t0 = time.time()
+    tlast = np.nan
     for l, width in enumerate(widths):
         radex.deltav = width
         for t, temp in enumerate(temperatures):
@@ -73,22 +85,27 @@ def runRADEX(species, widths, temperatures, densities, columns, **kwargs):
                 radex.density = densityDict(dens, opr, opr_flag)
                 for c, col in enumerate(columns):
                     radex.column = col
+
+                    # Reload the molfile if temperature has changed.
                     with np.errstate(divide='ignore'):
-                        radex.run_radex(reuse_last=False, reload_molfile=True)
+                        if tlast == temp:
+                            radex.run_radex()
+                        else:
+                            radex.run_radex(reload_molfile=True)
+                        tlast = temp
+
+                    # Parse the results.
                     Tb[:, 0, l, t, d, c] = radex.T_B[:jmax]
-                    Tb[:, 1, l, t, d, c] = radex.tau[:jmax]
+                    Tb[:, 1, l, t, d, c] = radex.Tex[:jmax]
+                    Tb[:, 2, l, t, d, c] = radex.tau[:jmax]
+
     Tb = np.nan_to_num(Tb)
     t1 = time.time()
 
-    print 'Generated table in {}.'.format(seconds2hms(t1-t0))
+    if kwargs.get('verbose', True):
+        print 'Generated table in {}.'.format(seconds2hms(t1-t0))
 
-    # Use the filename convention,
-    #       species_widths_temperatures_densities_columns.npy
-    # where each variable contains the three values,
-    #       minval_maxval_nvals,
-    # with number in the '%.2f' format. This will help with reading
-    # in the file.
-
+    # Save the file.
     fn = '{}_'.format(species)
     fn += '{:.2f}_{:.2f}_{:d}_'.format(wmin, wmax, wnum)
     fn += '{:.2f}_{:.2f}_{:d}_'.format(tmin, tmax, tnum)

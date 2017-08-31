@@ -87,10 +87,6 @@ class obsglobal:
 
         # Check that the radial points of each transition are the same.
         if len(self.files) > 1:
-            if not all([np.array_equal(r, self.radii[0]) for r in self.radii]):
-                raise ValueError('Mismatched radial sampling.')
-            else:
-                self.radii = np.unique(self.radii)
             self.spectra = [d[2] for d in self.datas]
             self.trans = [self.findtransitions(fn) for fn in self.files]
         else:

@@ -1,44 +1,78 @@
 """
-Class to fit slab models with a single temperature and density. Assume that
-the excitation conditions are {Tkin, nH2, NCS, M}. In addition, each line has
-the parameters {x0_i, var_i, vcorr_i} which specify the line centre, the
-variance of the noise and the correlation of the noise. Thus for N lines we
-have 4 + 3N free parameters.
+Class to fit spectra with a Gaussian line profile. It allows the simultaneous
+fitting of multiple transitions, accounts for both non-LTE and LTE excitation,
+the inclusion of non-thermal broadening components and the option to model the
+noise with Gaussian Processes with george.
 
-Is there a way to implement this for N lines? Or do I have to hardcode it all?
+-- Input:
 
-Input:
-    dic - slab dictionary of spectra from slabclass.py.
-    gridpath - path to the pre-calculated intensities.
+    dic - A dictionary containing the spectra to fit. The keys are the lower
+        energy level of the transition. Each dictionary must contain estimates
+        of the peak brightness, line centre and line width.
+
+    grid - Path to the pre-calculated line brightnesses from RADEX.
+
+-- Optional Input:
+
+    verbose [bool]      - Writes messages of what is going on.
+    diagnostics [bool]  - Plots the sampling, best fit models and corner plots.
+
+    GP [bool]           - Model the noise with Gaussian proccesses with Geroge.
+                          This will vastly slow down the computation.
+    laminar [bool]      - Force non-thermal broadening to be zero.
+    singlemach [bool]   - All lines share the same non-thermal broadening.
+    logmach [bool]      - Use logarithmic sampling for non-thermal broadening.
+    lte [bool]          - Assume LTE (assume this is the largest density in the
+                          attached RADEX grid).
+    vbeam [float]       - Additional non-thermal term to account for beamsize.
+    vdeproj [float]     - Broadening factor induced by the azimuthal averaging.
+                          It must be equal to or larger than 1.
+
+The MCMC is set up to run relatively well with the default settings. Burn-in is
+performed in two steps, the first starts from random positions allowed by the
+attached grid running for 500 steps. The walkers are restarted with a small
+scatter around the median position of the walkers. This should be closer to the
+correct value and allow for the removal of walkers trapped in bad locations.
+This then runs for an additional 1000 steps. The last 500 of these are taken as
+the posterior and used to plot the corner plot.
+
+-- emcee Input:
+
+    nwalkers [int]      - Number of walkers. More walkers is much, much better
+                          than more steps.
+    nburnin1 [int]      - Number of steps for the intial stage of burn-in.
+    nburnin2 [int]      - Number of steps for the second stage of burn-in.
+    nsteps [int]        - Nuumber of steps used for the posterior sampling.
+
+-- TODO:
+
+    1) Remove the line centre as a free parameter and fix it to 0.
+    2) Allow the noise model for all transitions to be the same.
+    3) Update this for a single spectral axis but multiple components.
+    4) Allow for slightly optically thick lines to deviate from Gaussian.
 
 """
 
 import time
 import emcee
 import george
-import corner
 import numpy as np
 import scipy.constants as sc
 from linex.radexgridclass import radexgrid
 from george.kernels import ExpSquaredKernel as ExpSq
-import matplotlib.pyplot as plt
+from linex.plotting import plotsampling
+from linex.plotting import plotcorner
+from linex.plotting import plotobservations
+from linex.plotting import plotbestfit
 
 
 class fitdict:
 
-    B0 = 2.449913e10
-    nu = {2: 146.9690287e9,
-          4: 244.9355565e9,
-          6: 342.8828503}
-    gu = {2: 7.,
-          4: 11.,
-          6: 15.}
-
-    def __init__(self, dic, gridpath, **kwargs):
+    def __init__(self, dic, grid, **kwargs):
         """Fit the slab models."""
 
         self.dic = dic
-        self.grid = radexgrid(gridpath)
+        self.grid = radexgrid(grid)
 
         # If verbose, print what's going on. If diagnostics is true, plot
         # several diagnostic plots: burn-in plots, samples, posterior corner
@@ -83,6 +117,10 @@ class fitdict:
             print("Assuming v_beam = %.0f m/s." % self.vbeam)
             print("Change this at any time through 'self.vbeam'.")
 
+        self.vdeproj = max(kwargs.get('vdeproj', 1.0), 1.0)
+        if self.vdeproj > 1.0 and self.verbose:
+            print("Including deprojection broadening of %.2f." % self.vdeproj)
+
         self.singlemach = kwargs.get('singlemach', True)
         if self.laminar:
             self.singlemach = True
@@ -102,7 +140,7 @@ class fitdict:
         # If we don't use it, the fitting is much quicker as we just use a more
         # simple chi-squared approach.
 
-        self.GP = kwargs.get('GP', False)
+        self.GP = kwargs.get('GP', kwargs.get('gp', False))
         if self.GP and self.verbose:
                 print("Using Gaussian processes to model noise.")
 
@@ -226,7 +264,7 @@ class fitdict:
             dV_int = self.linewidth(t, mach)
             dV_obs = self.linewidth(t, mach + vbeam)
         A = self.grid.intensity(j, dV_int, t, d, s)
-        return self.gaussian(x, x0, dV_obs, A)
+        return self.gaussian(x, x0, self.vdeproj * dV_obs, A)
 
     def _lnlike(self, theta):
         """Log-likelihood with chi-squared likelihood function."""
@@ -284,7 +322,8 @@ class fitdict:
         """Run emcee."""
 
         nwalkers = kwargs.get('nwalkers', 200)
-        nburnin = kwargs.get('nburnin', 500)
+        nburnin1 = kwargs.get('nburnin1', 500)
+        nburnin2 = kwargs.get('nburnin2', nburnin1)
         nsteps = kwargs.get('nsteps', 500)
 
         # For the sampling, we first sample the whole parameter space. After
@@ -300,17 +339,17 @@ class fitdict:
 
         if self.verbose:
             print("Running first burn-in...")
-        pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin)
+        pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin1)
         pos = pos[np.argmax(lp)] + 1e-4 * np.random.randn(nwalkers, self.ndim)
         if self.diagnostics:
-            self.plotsampling(sampler, title='First Burn-In')
+            plotsampling(sampler, self.params, title='First Burn-In')
         sampler.reset()
 
         if self.verbose:
             print("Running second burn-in...")
-        pos, _, _ = sampler.run_mcmc(pos, nburnin)
+        pos, _, _ = sampler.run_mcmc(pos, nburnin2)
         if self.diagnostics:
-            self.plotsampling(sampler, title='Second Burn-In')
+            plotsampling(sampler, self.params, title='Second Burn-In')
 
         if self.verbose:
             print("Running productions...")
@@ -318,10 +357,12 @@ class fitdict:
         pos, _, _ = sampler.run_mcmc(pos, nsteps)
 
         if self.diagnostics:
-            self.plotsampling(sampler, title='Production')
-            ax = self.plotobservations()
-            self.plotbestfit(sampler, ax=ax)
-            self.plotcorner(sampler)
+            plotsampling(sampler, self.params, title='Production')
+            ax = plotobservations(self.trans, self.velaxs,
+                                  self.spectra, self.rms)
+            plotbestfit(self.trans, self.velax,
+                        self.bestfitmodels(sampler), ax=ax)
+            plotcorner(sampler, self.params)
         if self.verbose:
             t = self.hmsformat(time.time()-t0)
             print("Production complete in %s." % t)
@@ -337,71 +378,9 @@ class fitdict:
         else:
             raise ValueError("Method must be 'median' or 'mean'.")
 
-    def plotbestfit(self, sampler, ax=None):
-        """Plot the best-fit spectra."""
-        if ax is None:
-            fig, ax = plt.subplots()
-        models = self._calculatemodels(self._calculatetheta(sampler))
-        for x, y, J in zip(self.velaxs, models, self.trans):
-            ax.scatter(x, y, color='r')
-        ax.legend(fontsize=6)
-        return ax
-
-    def plotobservations(self, ax=None):
-        """Plot the emission lines which are to be fit."""
-        if ax is None:
-            fig, ax = plt.subplots()
-        for i, t in enumerate(self.trans):
-            l = ax.plot(self.velaxs[i], self.spectra[i], lw=1.25,
-                        label=r'J = %d - %d' % (t+1, t))
-            ax.fill_between(self.velaxs[i],
-                            self.spectra[i] - 3.0 * self.rms[i],
-                            self.spectra[i] + 3.0 * self.rms[i],
-                            lw=0.0, alpha=0.2, color=l[0].get_color(),
-                            zorder=-3)
-        ax.set_xlabel(r'${\rm Velocity \quad (km s^{-1})}$')
-        ax.set_ylabel(r'${\rm Brightness \quad (K)}$')
-        ax.legend(frameon=False, markerfirst=False)
-        return ax
-
-    def plotsampling(self, sampler, color='dodgerblue', title=None):
-        """Plot the sampling."""
-
-        # Loop through each of the parameters and plot their sampling.
-        for param, samples in zip(self.params, sampler.chain.T):
-            fig, ax = plt.subplots()
-
-            # Plot the individual walkers.
-            for walker in samples.T:
-                ax.plot(walker, alpha=0.075, color='k')
-
-            # Plot the percentiles.
-            l, m, h = np.percentile(samples, [16, 50, 84], axis=1)
-            mm = np.mean(m)
-            ax.axhline(mm, color='w', ls='--')
-            ax.plot(l, color=color, lw=1.0)
-            ax.plot(m, color=color, lw=1.0)
-            ax.plot(h, color=color, lw=0.5)
-
-            # Rescale the axes to make everything visible.
-            ll = mm - l[-1]
-            hh = mm - h[-1]
-            yy = max(ll, hh)
-            ax.set_ylim(mm - 3.5 * yy, mm + 3.5 * yy)
-            ax.set_xlim(0, m.size)
-
-            # Axis labels.
-            ax.set_xlabel(r'$N_{\rm steps}$')
-            ax.set_ylabel(r'${\rm %s}$' % param)
-            if title is not None:
-                ax.set_title(title)
-        return
-
-    def plotcorner(self, sampler):
-        """Plot the corner plot."""
-        corner.corner(sampler.flatchain, labels=self.params,
-                      quantiles=[0.16, 0.5, 0.84], show_titles=True)
-        return
+    def bestfitmodels(self, sampler):
+        """Return the best-fit models."""
+        return self._calculatemodels(self._calculatetheta(sampler))
 
     def thermalwidth(self, T):
         """Thermal Doppler width [m/s]."""
