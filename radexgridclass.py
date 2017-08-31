@@ -22,6 +22,15 @@ class radexgrid:
             raise ValueError('Must be a .npy file.')
         self.grid = np.load(self.path)
         self.grid = np.where(np.isfinite(self.grid), self.grid, 0.0)
+        if self.grid.shape[1] == 1:
+            print("Grid has [Tb].")
+            self.hastau = False
+        elif self.grid.shape[1] == 2:
+            print("Grid has [Tb, tau].")
+            self.hastau = True
+        else:
+            print("Grid has [Tb, Tex, tau].")
+            self.hastau = True
         self.parameters = ['width', 'temp', 'dens', 'sigma']
         self.mu = self.read_molecular_weight()
         self.parse_filename()
@@ -78,10 +87,15 @@ class radexgrid:
         """Returns integrated intensity [K km/s]. Width is stddev."""
         return self.intensity(j, w, t, r, s) * w * np.sqrt(2. * np.pi)
 
+    def Tex(self, j, w, t, r, s):
+        """Returns the excitation temperature [K]. Width is stddev."""
+        idxs = self.indices(j, self.fwhm * w, t, r, s)
+        return map_coordinates(self.grid[j, 1], idxs, order=1, mode='nearest')
+
     def tau(self, j, w, t, r, s):
         """Interpolate the optical depth grid."""
         idxs = self.indices(j, self.fwhm * w, t, r, s)
-        return map_coordinates(self.grid[j, 1], idxs, order=1, mode='nearest')
+        return map_coordinates(self.grid[j, -1], idxs, order=1, mode='nearest')
 
     def read_molecular_weight(self):
         """Read the molecular weight from collisional rates."""

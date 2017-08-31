@@ -29,6 +29,8 @@ noise with Gaussian Processes with george.
                           It must be equal to or larger than 1.
     tdeproj [float]     - Rescale the model spectra by this factor to account
                           for the loss in peak from azimuthal averaging.
+    thick [bool]        - Use a line profile assuming tau is Gaussian. Very
+                          much work in progress!
 
 The MCMC is set up to run relatively well with the default settings. Burn-in is
 performed in two steps, the first starts from random positions allowed by the
@@ -49,10 +51,7 @@ the posterior and used to plot the corner plot.
 -- TODO:
 
     1) Remove the line centre as a free parameter and fix it to 0.
-    2) Allow the noise model for all transitions to be the same.
-    3) Update this for a single spectral axis but multiple components.
-    4) Allow for slightly optically thick lines to deviate from Gaussian.
-    5) All for vbeam, vdeproj and tdeproj to be applied separately if required.
+    2) Update this for a single spectral axis but multiple components.
 
 """
 
@@ -112,6 +111,10 @@ class fitdict:
         self.vdeproj = self._makeiterable('vdeproj', 1.0, **kwargs)
         self.tdeproj = self._makeiterable('tdeproj', 1.0, **kwargs)
 
+        self.thick = kwargs.get('thick', False)
+        if self.thick and not self.grid.hastau:
+            raise ValueError("Attached grid does not have tau values.")
+
         # Set up the noise, estimating it in the spectrum and controlling the
         # noise model if requested.
 
@@ -126,6 +129,9 @@ class fitdict:
 
         self.verbose = kwargs.get('verbose', True)
         if self.verbose:
+            print("Estimated RMS of each line:")
+            for j, sig in zip(self.trans, self.rms):
+                print("  J = %d - %d: %.1f mK" % (j+1, j, 1e3 * sig))
             if any(self.vbeam > 0.0):
                 print("Including a beam broadening term.")
             if any(self.vdeproj != 1.0):
@@ -140,6 +146,9 @@ class fitdict:
                 print("Assuming LTE.")
             if self.GP:
                 print("Using Gaussian processes to model noise.")
+            if self.thick:
+                print("Including opacity in line profile calculation.")
+            print("")
         self.diagnostics = kwargs.get('diagnostics', True)
 
         return
@@ -160,12 +169,7 @@ class fitdict:
         for k in range(self.ntrans):
             mask = abs(self.velaxs[k] - self.x0s[k]) > 0.5
             rms += [np.nanstd(self.spectra[k][mask])]
-        rms = np.array(rms)
-        if self.verbose:
-            print("Estimated RMS of each line:")
-            for j, sig in zip(self.trans, rms):
-                print("  J = %d - %d: %.1f mK" % (j+1, j, 1e3 * sig))
-        return rms
+        return np.array(rms)
 
     def _popparams(self):
         """Populates the free variables and the number of dimensions."""
@@ -271,7 +275,14 @@ class fitdict:
         Tb = self.grid.intensity(j, dV_int, t, d, s)
         dV_obs *= self.vdeproj[abs(self.trans - j).argmin()]
         Tb *= self.tdeproj[abs(self.trans - j).argmin()]
-        return self.gaussian(x, x0, dV_obs, Tb)
+        if not self.thick:
+            return self.gaussian(x, x0, dV_obs, Tb)
+        tau = self.grid.tau(j, dV_int, t, d, s)
+        return self.thickline(x, x0, dV_obs, Tb, tau)
+
+    def thickline(self, x, x0, dx, Tb, tau):
+        """Returns an optically thick line profile."""
+        return Tb * (1. - np.exp(-self.gaussian(x, x0, dx, tau)))
 
     def _lnlike(self, theta):
         """Log-likelihood with chi-squared likelihood function."""
