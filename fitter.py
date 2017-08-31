@@ -27,6 +27,8 @@ noise with Gaussian Processes with george.
     vbeam [float]       - Additional non-thermal term to account for beamsize.
     vdeproj [float]     - Broadening factor induced by the azimuthal averaging.
                           It must be equal to or larger than 1.
+    tdeproj [float]     - Rescale the model spectra by this factor to account
+                          for the loss in peak from azimuthal averaging.
 
 The MCMC is set up to run relatively well with the default settings. Burn-in is
 performed in two steps, the first starts from random positions allowed by the
@@ -50,6 +52,7 @@ the posterior and used to plot the corner plot.
     2) Allow the noise model for all transitions to be the same.
     3) Update this for a single spectral axis but multiple components.
     4) Allow for slightly optically thick lines to deviate from Gaussian.
+    5) All for vbeam, vdeproj and tdeproj to be applied separately if required.
 
 """
 
@@ -60,10 +63,10 @@ import numpy as np
 import scipy.constants as sc
 from linex.radexgridclass import radexgrid
 from george.kernels import ExpSquaredKernel as ExpSq
-from linex.plotting import plotsampling
-from linex.plotting import plotcorner
-from linex.plotting import plotobservations
-from linex.plotting import plotbestfit
+from plotting import plotsampling
+from plotting import plotcorner
+from plotting import plotobservations
+from plotting import plotbestfit
 
 
 class fitdict:
@@ -74,18 +77,12 @@ class fitdict:
         self.dic = dic
         self.grid = radexgrid(grid)
 
-        # If verbose, print what's going on. If diagnostics is true, plot
-        # several diagnostic plots: burn-in plots, samples, posterior corner
-        # plots and best-fit models overlaid on observations.
-
-        self.verbose = kwargs.get('verbose', True)
-        self.diagnostics = kwargs.get('diagnostics', True)
-
-        # Read in the models and their simple-fit values for estimating noise.
-        # Everything should be ordered in the lower energy transitions first.
+        # Read in the observations and their best fit values.
+        # TODO: There must be a more efficient way of doing this...
 
         self.trans = sorted([k for k in self.dic.keys()])
-        self.ntrans = len(self.trans)
+        self.trans = np.array(self.trans)
+        self.ntrans = self.trans.size
         self.Tbs = [self.dic[k].Tb for k in self.trans]
         self.dxs = [self.dic[k].dx for k in self.trans]
         self.x0s = [self.dic[k].x0 for k in self.trans]
@@ -93,61 +90,69 @@ class fitdict:
         self.spectra = [self.dic[k].spectrum for k in self.trans]
         self.mu = self.dic[self.trans[0]].mu
 
-        # Control the type of turbulence we want to model.
-        # If laminar, don't assume any turbulent broadening.
-        # If logmach, fit log(M) rather than M. This is better for limits.
-        # If singlemach, assume a common non-thermal broadening term.
-        # If vbeam > 0.0, include an additional broadening term to the profile.
-
-        self.laminar = kwargs.get('laminar', False)
-        if self.laminar and self.verbose:
-            print("Assuming only thermal broadening.")
-
-        self.logmach = kwargs.get('logmach', False)
-        if self.logmach and self.verbose:
-            print("Fitting for log-Mach.")
-
-        if self.logmach and self.laminar:
-            self.logmach = False
-            if self.verbose:
-                print("Model is laminar, reverting from log-Mach.")
-
-        self.vbeam = kwargs.get('vbeam', 0.0)
-        if self.vbeam > 0.0 and self.verbose:
-            print("Assuming v_beam = %.0f m/s." % self.vbeam)
-            print("Change this at any time through 'self.vbeam'.")
-
-        self.vdeproj = max(kwargs.get('vdeproj', 1.0), 1.0)
-        if self.vdeproj > 1.0 and self.verbose:
-            print("Including deprojection broadening of %.2f." % self.vdeproj)
-
-        self.singlemach = kwargs.get('singlemach', True)
-        if self.laminar:
-            self.singlemach = True
-        if not self.singlemach and self.verbose:
-            print("Allowing individual non-thermal components.")
+        # Set up the type of density we will model.
 
         self.lte = kwargs.get('lte', kwargs.get('LTE', False))
-        if self.lte and self.verbose:
-            print("Assuming LTE.")
 
-        # Estimate the noise from the channels far from the line centre. Note
-        # that these values are only used as starting values for the fitting.
+        # Control the type of turbulence we want to model.
+
+        self.laminar = kwargs.get('laminar', False)
+        self.logmach = kwargs.get('logmach', False)
+        self.singlemach = kwargs.get('singlemach', True)
+        if self.logmach and self.laminar:
+            self.logmach = False
+        if self.laminar:
+            self.singlemach = True
+
+        # Include addtional terms to model the observational effects.
+        # With these variables, check to see if they're iterable, otherwise
+        # extend them into a list with length self.ntrans.
+
+        self.vbeam = self._makeiterable('vbeam', 0.0, **kwargs)
+        self.vdeproj = self._makeiterable('vdeproj', 1.0, **kwargs)
+        self.tdeproj = self._makeiterable('tdeproj', 1.0, **kwargs)
+
+        # Set up the noise, estimating it in the spectrum and controlling the
+        # noise model if requested.
 
         self.rms = self._estimatenoise()
-
-        # Check if we want to include Gaussian processes to model the noise.
-        # If we don't use it, the fitting is much quicker as we just use a more
-        # simple chi-squared approach.
-
         self.GP = kwargs.get('GP', kwargs.get('gp', False))
-        if self.GP and self.verbose:
-                print("Using Gaussian processes to model noise.")
 
-        # Writ a list of the free parameters which we will fit.
+        # Populate the parameters to fit.
+
         self._popparams()
 
+        # Output messages.
+
+        self.verbose = kwargs.get('verbose', True)
+        if self.verbose:
+            if any(self.vbeam > 0.0):
+                print("Including a beam broadening term.")
+            if any(self.vdeproj != 1.0):
+                print("Including deprojection broadening term.")
+            if any(self.tdeproj != 1.0):
+                print("Including a brightness temperature scaling factor.")
+            if self.laminar:
+                print("Assuming only thermal broadening.")
+            if self.logmach:
+                print("Fitting for log-Mach.")
+            if self.lte:
+                print("Assuming LTE.")
+            if self.GP:
+                print("Using Gaussian processes to model noise.")
+        self.diagnostics = kwargs.get('diagnostics', True)
+
         return
+
+    def _makeiterable(self, name, default, **kwargs):
+        """Return a kwarg argument that's iterable."""
+        val = np.array([kwargs.get(name, default)]).flatten()
+        if len(val) == self.ntrans:
+            return np.squeeze(val)
+        elif len(val) == 1:
+            return np.squeeze([val for _ in range(self.ntrans)])
+        else:
+            raise ValueError("Must be single or one for each spectrum.")
 
     def _estimatenoise(self):
         """Estimate the noise in each spectra."""
@@ -256,15 +261,17 @@ class fitdict:
 
     def _spectrum(self, j, t, d, s, x, x0, mach):
         """Returns a spectrum on the provided velocity axis."""
-        vbeam = self.vbeam / self.soundspeed(t)
+        vbeam = self.vbeam[abs(self.trans - j).argmin()] / self.soundspeed(t)
         if self.logmach:
             dV_int = self.linewidth(t, np.power(10, mach))
             dV_obs = self.linewidth(t, np.power(10, mach) + vbeam)
         else:
             dV_int = self.linewidth(t, mach)
             dV_obs = self.linewidth(t, mach + vbeam)
-        A = self.grid.intensity(j, dV_int, t, d, s)
-        return self.gaussian(x, x0, self.vdeproj * dV_obs, A)
+        Tb = self.grid.intensity(j, dV_int, t, d, s)
+        dV_obs *= self.vdeproj[abs(self.trans - j).argmin()]
+        Tb *= self.tdeproj[abs(self.trans - j).argmin()]
+        return self.gaussian(x, x0, dV_obs, Tb)
 
     def _lnlike(self, theta):
         """Log-likelihood with chi-squared likelihood function."""
@@ -360,7 +367,7 @@ class fitdict:
             plotsampling(sampler, self.params, title='Production')
             ax = plotobservations(self.trans, self.velaxs,
                                   self.spectra, self.rms)
-            plotbestfit(self.trans, self.velax,
+            plotbestfit(self.trans, self.velaxs,
                         self.bestfitmodels(sampler), ax=ax)
             plotcorner(sampler, self.params)
         if self.verbose:
