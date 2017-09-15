@@ -23,13 +23,10 @@ class radexgrid:
         self.grid = np.load(self.path)
         self.grid = np.where(np.isfinite(self.grid), self.grid, 0.0)
         if self.grid.shape[1] == 1:
-            print("Grid has [Tb].")
             self.hastau = False
         elif self.grid.shape[1] == 2:
-            print("Grid has [Tb, tau].")
             self.hastau = True
         else:
-            print("Grid has [Tb, Tex, tau].")
             self.hastau = True
         self.parameters = ['width', 'temp', 'dens', 'sigma']
         self.mu = self.read_molecular_weight()

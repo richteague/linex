@@ -50,8 +50,7 @@ the posterior and used to plot the corner plot.
 
 -- TODO:
 
-    1) Remove the line centre as a free parameter and fix it to 0.
-    2) Update this for a single spectral axis but multiple components.
+    1) Update this for a single spectral axis but multiple components.
 
 """
 
@@ -75,6 +74,7 @@ class fitdict:
 
         self.dic = dic
         self.grid = radexgrid(grid)
+        self.verbose = kwargs.get('verbose', True)
 
         # Read in the observations and their best fit values.
         # TODO: There must be a more efficient way of doing this...
@@ -127,8 +127,8 @@ class fitdict:
 
         # Output messages.
 
-        self.verbose = kwargs.get('verbose', True)
         if self.verbose:
+            print("\n")
             print("Estimated RMS of each line:")
             for j, sig in zip(self.trans, self.rms):
                 print("  J = %d - %d: %.1f mK" % (j+1, j, 1e3 * sig))
@@ -140,6 +140,8 @@ class fitdict:
                 print("Including a brightness temperature scaling factor.")
             if self.laminar:
                 print("Assuming only thermal broadening.")
+            if self.singlemach:
+                print("Fitting individual non-thermal width components.")
             if self.logmach:
                 print("Fitting for log-Mach.")
             if self.lte:
@@ -148,7 +150,7 @@ class fitdict:
                 print("Using Gaussian processes to model noise.")
             if self.thick:
                 print("Including opacity in line profile calculation.")
-            print("")
+            print("\n")
         self.diagnostics = kwargs.get('diagnostics', True)
 
         return
@@ -180,8 +182,6 @@ class fitdict:
         if self.singlemach:
             self.params += ['mach']
         else:
-            if self.verbose:
-                print("Fitting individual non-thermal width components.")
             for i in range(len(self.trans)):
                 self.params += ['mach_%d' % i]
         for i in range(len(self.trans)):
