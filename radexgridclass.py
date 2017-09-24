@@ -76,7 +76,7 @@ class radexgrid:
         return [[w], [t], [r], [s]]
 
     def intensity(self, j, w, t, r, s):
-        """Returns total intensity in [K km/s]. Width is stdev of line."""
+        """Returns peak brightness in [K]. Width is stdev of line."""
         idxs = self.indices(j, self.fwhm * w, t, r, s)
         return map_coordinates(self.grid[j, 0], idxs, order=1, mode='nearest')
 

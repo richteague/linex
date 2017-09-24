@@ -46,8 +46,12 @@ the posterior and used to plot the corner plot.
                           than more steps.
     nburnin1 [int]      - Number of steps for the intial stage of burn-in.
     nburnin2 [int]      - Number of steps for the second stage of burn-in.
-    nsteps [int]        - Nuumber of steps used for the posterior sampling.
-
+    nsteps [int]        - Number of steps used for the posterior sampling.
+    p0 [list]           - Starting positions for the emcee. If not specified
+                          then random positions across the entire grid will be
+                          chosen. While this allows one to explore the whole
+                          space, it may result in the global minima not being
+                          found.
 -- TODO:
 
     1) Update this for a single spectral axis but multiple components.
@@ -239,7 +243,7 @@ class fitdict:
 
         # Non-thermal broadening.
         if self.logmach:
-            if not all([-5.0 < m < -0.3 for m in mach]):
+            if not all([-5.0 < m < 0.0 for m in mach]):
                 return -np.inf
         else:
             if not all([0.0 <= m < 0.5 for m in mach]):
@@ -343,31 +347,35 @@ class fitdict:
         nburnin1 = kwargs.get('nburnin1', 500)
         nburnin2 = kwargs.get('nburnin2', nburnin1)
         nsteps = kwargs.get('nsteps', 500)
+        p0 = kwargs.get('p0', None)
 
-        # For the sampling, we first sample the whole parameter space. After
-        # the burn-in phase, we recenter the walkers around the median value in
-        # each parameter and start from there. For noise parameters we sample
-        # around the estimated RMS value and assume a correlation ranging
-        # between 1 m/s and 100 m/s.
-
-        pos = self._startingpositions(nwalkers)
-        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self._lnprob)
+        # For the initial positions, unless they are provided through the p0
+        # kwarg, run a burn-in cycle with positions starting randomly within
+        # the entire grid.
 
         t0 = time.time()
+        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self._lnprob)
 
-        if self.verbose:
-            print("Running first burn-in...")
-        pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin1)
-        pos = pos[np.argmax(lp)] + 1e-4 * np.random.randn(nwalkers, self.ndim)
-        if self.diagnostics:
-            plotsampling(sampler, self.params, title='First Burn-In')
-        sampler.reset()
+        if p0 is None:
+            pos = self._startingpositions(nwalkers)
+            if self.verbose:
+                print("Finding p0...")
+            pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin1)
+            pos = pos[np.argmax(lp)]
+            if self.diagnostics:
+                plotsampling(sampler, self.params, title='Estimating p0')
+            sampler.reset()
+        else:
+            pos = p0
+            if len(pos) != len(self.params):
+                raise ValueError("Wrong number of starting positions.")
 
+        pos = pos + 1e-4 * np.random.randn(nwalkers, self.ndim)
         if self.verbose:
-            print("Running second burn-in...")
+            print("Running burn-in...")
         pos, _, _ = sampler.run_mcmc(pos, nburnin2)
         if self.diagnostics:
-            plotsampling(sampler, self.params, title='Second Burn-In')
+            plotsampling(sampler, self.params, title='Burn-In')
 
         if self.verbose:
             print("Running productions...")
