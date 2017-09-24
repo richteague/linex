@@ -343,10 +343,10 @@ class fitdict:
     def emcee(self, **kwargs):
         """Run emcee."""
 
-        nwalkers = kwargs.get('nwalkers', 200)
+        nwalkers = kwargs.get('nwalkers', 1000)
         nburnin1 = kwargs.get('nburnin1', 500)
-        nburnin2 = kwargs.get('nburnin2', nburnin1)
-        nsteps = kwargs.get('nsteps', 500)
+        nburnin2 = kwargs.get('nburnin2', 500)
+        nsteps = kwargs.get('nsteps', 200)
         p0 = kwargs.get('p0', None)
 
         # For the initial positions, unless they are provided through the p0
@@ -358,24 +358,25 @@ class fitdict:
 
         if p0 is None:
             pos = self._startingpositions(nwalkers)
-            if self.verbose:
-                print("Finding p0...")
-            pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin1)
-            pos = pos[np.argmax(lp)]
-            if self.diagnostics:
-                plotsampling(sampler, self.params, title='Estimating p0')
-            sampler.reset()
         else:
             pos = p0
             if len(pos) != len(self.params):
                 raise ValueError("Wrong number of starting positions.")
+            pos = (pos + 1e-4 * np.random.randn(nwalkers, self.ndim)).T
 
-        pos = pos + 1e-4 * np.random.randn(nwalkers, self.ndim)
         if self.verbose:
-            print("Running burn-in...")
+            print("Initial burn-in...")
+        pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin1)
+        pos = pos[np.argmax(lp)] + 1e-4 * np.random.randn(nwalkers, self.ndim)
+        if self.diagnostics:
+            plotsampling(sampler, self.params, title='Initial Burn-In')
+        sampler.reset()
+
+        if self.verbose:
+            print("Running main burn-in...")
         pos, _, _ = sampler.run_mcmc(pos, nburnin2)
         if self.diagnostics:
-            plotsampling(sampler, self.params, title='Burn-In')
+            plotsampling(sampler, self.params, title='Main Burn-In')
 
         if self.verbose:
             print("Running productions...")
