@@ -255,9 +255,9 @@ class fitdict:
 
         # Noise properties.
         if self.GP:
-            if not all([0. < s < 0.1 for s in sigs]):
+            if not all([-5. < s < 0. for s in sigs]):
                 return -np.inf
-            if not all([-15. < c < 0. for c in corrs]):
+            if not all([-5. < c < 0. for c in corrs]):
                 return -np.inf
         return 0.0
 
@@ -304,7 +304,8 @@ class fitdict:
     def _calculatenoises(self, theta):
         """Return the noise models."""
         _, _, _, _, _, sigs, corrs = self._parse(theta)
-        return [george.GP(s**2 * ExpSq(10**c)) for s, c in zip(sigs, corrs)]
+        return [george.GP(np.power(10, s)**2 * ExpSq(10**c))
+                for s, c in zip(sigs, corrs)]
 
     def _chisquared(self, models):
         """Chi-squared likelihoo function."""
@@ -336,14 +337,14 @@ class fitdict:
         for i in range(self.ntrans):
             pos += [self.x0s[i] + 1e-2 * np.random.randn(nwalkers)]
             if self.GP:
-                pos += [self.rms[i]**2 + 1e-4 * np.random.randn(nwalkers)]
+                pos += [np.random.uniform(-3, -1, nwalkers)]
                 pos += [np.random.uniform(-3, -1, nwalkers)]
         return pos
 
     def emcee(self, **kwargs):
         """Run emcee."""
 
-        nwalkers = kwargs.get('nwalkers', 1000)
+        nwalkers = kwargs.get('nwalkers', 400)
         nburnin1 = kwargs.get('nburnin1', 500)
         nburnin2 = kwargs.get('nburnin2', 500)
         nsteps = kwargs.get('nsteps', 200)

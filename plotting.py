@@ -60,6 +60,7 @@ def plotobservations(trans, velaxs, spectra, rms, ax=None):
                         spectra[i] + 3.0 * rms[i],
                         lw=0.0, alpha=0.2, color=l[0].get_color(),
                         zorder=-3)
+    ax.set_xlim(-0.75, 0.75)
     ax.set_xlabel(r'${\rm Velocity \quad (km s^{-1})}$')
     ax.set_ylabel(r'${\rm Brightness \quad (K)}$')
     ax.legend(frameon=False, markerfirst=False)

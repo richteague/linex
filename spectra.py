@@ -28,7 +28,7 @@ class spectrum:
         self.flux = np.trapz(self.spectrum, self.velax)
 
         # Estimate the RMS of the spectrum using line-free regions.
-        self.rms = np.nanstd(self.spectrum[abs(self.velax) > 3. * self.dx])
+        self.rms = np.nanstd(self.spectrum[abs(self.velax) > 4. * self.dx])
         return
 
     def fitGaussian(self):
