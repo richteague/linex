@@ -24,6 +24,10 @@ noise with Gaussian Processes with george.
     logmach [bool]      - Use logarithmic sampling for non-thermal broadening.
     lte [bool]          - Assume LTE (assume this is the largest density in the
                           attached RADEX grid).
+    fixT [float]        - Fix the kinetic temperature to that value.
+    fixn [float]        - Fix the volume density to that value. Note that LTE
+                          will override this.
+    fixN [float]        - Fix the column density to that value.
     vbeam [float]       - Additional non-thermal term to account for beamsize.
     vdeproj [float]     - Broadening factor induced by the azimuthal averaging.
                           It must be equal to or larger than 1.
@@ -71,6 +75,10 @@ from plotting import plotobservations
 from plotting import plotbestfit
 
 
+# CS line frequencies. TODO: Read this from the grid file or something.
+linefreq = {2: 146.9690287e9, 4: 244.9355565e9, 6: 342.8828503e9}
+
+
 class fitdict:
 
     def __init__(self, dic, grid, **kwargs):
@@ -92,10 +100,15 @@ class fitdict:
         self.velaxs = [self.dic[k].velax for k in self.trans]
         self.spectra = [self.dic[k].spectrum for k in self.trans]
         self.mu = self.dic[self.trans[0]].mu
+        self.freq = [linefreq[J] for J in self.trans]
 
-        # Set up the type of density we will model.
+        # Set up the type of model we want and if we want to hold any of the
+        # values fixed during the fitting.
 
         self.lte = kwargs.get('lte', kwargs.get('LTE', False))
+        self.fixT = kwargs.get('fixT', False)
+        self.fixN = kwargs.get('fixN', False)
+        self.fixn = kwargs.get('fixn', False)
 
         # Control the type of turbulence we want to model.
 
@@ -163,9 +176,9 @@ class fitdict:
         """Return a kwarg argument that's iterable."""
         val = np.array([kwargs.get(name, default)]).flatten()
         if len(val) == self.ntrans:
-            return np.squeeze(val)
+            return val
         elif len(val) == 1:
-            return np.squeeze([val for _ in range(self.ntrans)])
+            return [val for _ in range(self.ntrans)]
         else:
             raise ValueError("Must be single or one for each spectrum.")
 
@@ -179,10 +192,13 @@ class fitdict:
 
     def _popparams(self):
         """Populates the free variables and the number of dimensions."""
-        if self.lte:
-            self.params = ['temp', 'sigma']
-        else:
-            self.params = ['temp', 'dens', 'sigma']
+        self.params = []
+        if not self.fixT:
+            self.params += ['temp']
+        if not self.fixn and not self.lte:
+            self.params += ['dens']
+        if not self.fixN:
+            self.params += ['sigma']
         if self.singlemach:
             self.params += ['mach']
         else:
@@ -200,15 +216,20 @@ class fitdict:
     def _parse(self, theta):
         """Parses theta into {temp, dens, sigma, mach, x0s, sigs, corrs}."""
         zipped = zip(theta, self.params)
-        temp = theta[0]
-        if self.lte:
-            dens = self.grid.maxdens
-            sigma = theta[1]
+        if self.fixT:
+            temp = self.fixT
         else:
-            dens = theta[1]
-            sigma = theta[2]
+            temp = [t for t, p in zipped if 'temp' in p][0]
+        if self.fixn:
+            dens = self.fixn
+        else:
+            dens = [t for t, p in zipped if 'dens' in p][0]
+        if self.fixN:
+            sigma = self.fixN
+        else:
+            sigma = [t for t, p in zipped if 'sigma' in p][0]
         if not self.laminar:
-            mach = [t for t, n in zipped if 'mach' in n]
+            mach = [t for t, p in zipped if 'mach' in p]
         else:
             mach = [0.0]
         x0s = [t for t, n in zipped if 'x0_' in n]
@@ -276,17 +297,36 @@ class fitdict:
         else:
             dV_int = self.linewidth(t, mach)
             dV_obs = self.linewidth(t, mach + vbeam)
-        Tb = self.grid.intensity(j, dV_int, t, d, s)
         dV_obs *= self.vdeproj[abs(self.trans - j).argmin()]
-        Tb *= self.tdeproj[abs(self.trans - j).argmin()]
-        if not self.thick:
-            return self.gaussian(x, x0, dV_obs, Tb)
-        tau = self.grid.tau(j, dV_int, t, d, s)
-        return self.thickline(x, x0, dV_obs, Tb, tau)
 
-    def thickline(self, x, x0, dx, Tb, tau):
+        # Gaussian line profile.
+        if not self.thick:
+            Tb = self.grid.intensity(j, dV_int, t, d, s)
+            return self.gaussian(x, x0, dV_obs, Tb)
+
+        # Partially opticall thick line profile.
+        else:
+            Tex = self.grid.Tex(j, dV_int, t, d, s)
+            tau = self.grid.tau(j, dV_int, t, d, s)
+            nu = self.freq[abs(self.trans - j).argmin()]
+            return self.thickline(x, x0, dV_obs, Tex, tau, nu)
+
+    def thickline(self, x, x0, dx, Tex, tau, nu):
         """Returns an optically thick line profile."""
+        Tb = self._calculateTb(Tex, nu)
         return Tb * (1. - np.exp(-self.gaussian(x, x0, dx, tau)))
+
+    def _sourcefunction(self, T, nu):
+        """Source function of the line."""
+        J = np.exp(sc.h * nu / sc.k / T) - 1.
+        return sc.h * nu / sc.k / J
+
+    def _calculateTb(self, Tex, nu, Tbg=2.73):
+        """Calculate the brightness temperature from Tex."""
+        Jbg = self._sourcefunction(Tbg, nu)
+        hnk = sc.h * nu / sc.k
+        Tb = hnk / (np.exp(hnk / Tex) - 1.)
+        return Tb - Jbg
 
     def _lnlike(self, theta):
         """Log-likelihood with chi-squared likelihood function."""
@@ -318,11 +358,15 @@ class fitdict:
     def _startingpositions(self, nwalkers):
         """Return random starting positions."""
 
+        pos = []
+
         # Excitation conditions.
-        pos = [self.grid.random_samples('temp', nwalkers)]
-        if not self.lte:
+        if not self.fixT:
+            pos += [self.grid.random_samples('temp', nwalkers)]
+        if not self.fixn and not self.lte:
             pos += [self.grid.random_samples('dens', nwalkers)]
-        pos += [self.grid.random_samples('sigma', nwalkers)]
+        if not self.fixN:
+            pos += [self.grid.random_samples('sigma', nwalkers)]
 
         # Non-thermal broadening.
         if not self.laminar:
