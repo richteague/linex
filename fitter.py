@@ -103,12 +103,15 @@ class fitdict:
         self.freq = [linefreq[J] for J in self.trans]
 
         # Set up the type of model we want and if we want to hold any of the
-        # values fixed during the fitting.
+        # values fixed during the fitting. Can include uncertainties.
 
         self.lte = kwargs.get('lte', kwargs.get('LTE', False))
         self.fixT = kwargs.get('fixT', False)
         self.fixN = kwargs.get('fixN', False)
         self.fixn = kwargs.get('fixn', False)
+        self.dT = kwargs.get('dT', 0.0)
+        self.dN = kwargs.get('dN', 0.0)
+        self.dn = kwargs.get('dn', 0.0)
 
         # Control the type of turbulence we want to model.
 
@@ -217,15 +220,15 @@ class fitdict:
         """Parses theta into {temp, dens, sigma, mach, x0s, sigs, corrs}."""
         zipped = zip(theta, self.params)
         if self.fixT:
-            temp = self.fixT
+            temp = self.fixT + self.dT * np.random.randn()
         else:
             temp = [t for t, p in zipped if 'temp' in p][0]
         if self.fixn:
-            dens = self.fixn
+            dens = self.fixn + self.dn * np.random.randn()
         else:
             dens = [t for t, p in zipped if 'dens' in p][0]
         if self.fixN:
-            sigma = self.fixN
+            sigma = self.fixN + self.dN * np.random.randn()
         else:
             sigma = [t for t, p in zipped if 'sigma' in p][0]
         if not self.laminar:
@@ -385,8 +388,34 @@ class fitdict:
                 pos += [np.random.uniform(-3, -1, nwalkers)]
         return pos
 
+    def emcee_single(self, **kwargs):
+        """Run emcee with just one big sample."""
+        nwalkers = kwargs.get('nwalkers', 500)
+        nburnin = kwargs.get('nburnin', 100)
+        nsteps = kwargs.get('nsteps', 400)
+
+        if self.verbose:
+            t0 = time.time()
+        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self._lnprob)
+        pos = self._startingpositions(nwalkers)
+        sampler.run_mcmc(np.squeeze(pos).T, nburnin+nsteps)
+        if self.verbose:
+            t = self.hmsformat(time.time()-t0)
+            print("Production complete in %s." % t)
+
+        if self.diagnostics:
+            plotsampling(sampler, self.params, title='Production')
+            ax = plotobservations(self.trans, self.velaxs,
+                                  self.spectra, self.rms)
+            plotbestfit(self.trans, self.velaxs,
+                        self.bestfitmodels(sampler), ax=ax)
+            plotcorner(sampler, self.params)
+
+        samples = sampler.chain[:, nburnin:]
+        return samples.reshape(-1, samples.shape[-1]).T
+
     def emcee(self, **kwargs):
-        """Run emcee."""
+        """Run emcee with multiple runs to make the final nice."""
 
         nwalkers = kwargs.get('nwalkers', 400)
         nburnin1 = kwargs.get('nburnin1', 500)
