@@ -178,7 +178,7 @@ class fitdict:
         if len(val) == self.ntrans:
             return val
         elif len(val) == 1:
-            return [val for _ in range(self.ntrans)]
+            return np.squeeze([val for _ in range(self.ntrans)])
         else:
             raise ValueError("Must be single or one for each spectrum.")
 
