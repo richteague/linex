@@ -225,6 +225,8 @@ class fitdict:
             temp = [t for t, p in zipped if 'temp' in p][0]
         if self.fixn:
             dens = self.fixn + self.dn * np.random.randn()
+        elif self.lte:
+            dens = self.grid.maxdens
         else:
             dens = [t for t, p in zipped if 'dens' in p][0]
         if self.fixN:
