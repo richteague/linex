@@ -309,7 +309,7 @@ class fitdict:
             Tb = self.grid.intensity(j, dV_int, t, d, s)
             return self.gaussian(x, x0, dV_obs, Tb)
 
-        # Partially opticall thick line profile.
+        # Partially opticaly thick line profile.
         else:
             Tex = self.grid.Tex(j, dV_int, t, d, s)
             tau = self.grid.tau(j, dV_int, t, d, s)

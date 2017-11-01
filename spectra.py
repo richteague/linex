@@ -16,6 +16,10 @@ class spectrum:
         self.trans = trans
         self.mu = kwargs.get('mu', 44.)
 
+        # Include a recaling to mimic flux calibration.
+        if kwargs.get('rescale', False):
+            self.spectrum *= kwargs.get('rescale', 1.0)
+
         # Shift and rescale the velocity axis if appropriate.
         if kwargs.get('vunit', 'm/s') == 'm/s':
             self.velax /= 1e3
