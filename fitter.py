@@ -445,9 +445,9 @@ class fitdict:
         """Run emcee with multiple runs to make the final nice."""
 
         nwalkers = kwargs.get('nwalkers', 400)
-        nburnin1 = kwargs.get('nburnin1', 500)
-        nburnin2 = kwargs.get('nburnin2', 500)
-        nsteps = kwargs.get('nsteps', 200)
+        nburnin1 = kwargs.get('nburnin1', 300)
+        nburnin2 = kwargs.get('nburnin2', 300)
+        nsteps = kwargs.get('nsteps', 100)
         p0 = kwargs.get('p0', None)
 
         # For the initial positions, unless they are provided through the p0
