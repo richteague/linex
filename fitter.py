@@ -298,7 +298,7 @@ class fitdict:
         return [self._spectrum(j, t, d, s, v, x[i], m[i % len(m)])
                 for i, (j, v) in enumerate(zip(self.trans, self.velaxs))]
 
-    def _spectrum(self, j, t, d, s, x, x0, mach, N=20):
+    def _spectrum(self, j, t, d, s, x, x0, mach, N=6):
         """Returns a spectrum on the provided velocity axis."""
 
         # Choose the correct velocity axis to calculate the profile on.
