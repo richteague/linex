@@ -33,8 +33,8 @@ noise with Gaussian Processes with george.
                           It must be equal to or larger than 1.
     tdeproj [float]     - Rescale the model spectra by this factor to account
                           for the loss in peak from azimuthal averaging.
-    thick [bool]        - Use a line profile assuming tau is Gaussian. Very
-                          much work in progress!
+    thick [bool]        - Use a line profile assuming tau is Gaussian.
+    oversample [bool]   - Oversample the profile and include Hanning smoothing.
 
 The MCMC is set up to run relatively well with the default settings. Burn-in is
 performed in two steps, the first starts from random positions allowed by the
@@ -67,6 +67,7 @@ import emcee
 import george
 import numpy as np
 import scipy.constants as sc
+from scipy.interpolate import interp1d
 from linex.radexgridclass import radexgrid
 from george.kernels import ExpSquaredKernel as ExpSq
 from plotting import plotsampling
@@ -135,6 +136,8 @@ class fitdict:
         if self.thick and not self.grid.hastau:
             raise ValueError("Attached grid does not have tau values.")
 
+        self.oversample = kwargs.get('oversample', True)
+
         # Set up the noise, estimating it in the spectrum and controlling the
         # noise model if requested.
 
@@ -170,8 +173,10 @@ class fitdict:
                 print("Using Gaussian processes to model noise.")
             if self.thick:
                 print("Including opacity in line profile calculation.")
+            if self.oversample:
+                print("Oversampling the profile and smoothing the data.")
             print("\n")
-        self.diagnostics = kwargs.get('diagnostics', True)
+        self.diagnostics = kwargs.get('diagnostics', False)
 
         return
 
@@ -293,8 +298,20 @@ class fitdict:
         return [self._spectrum(j, t, d, s, v, x[i], m[i % len(m)])
                 for i, (j, v) in enumerate(zip(self.trans, self.velaxs))]
 
-    def _spectrum(self, j, t, d, s, x, x0, mach):
+    def _spectrum(self, j, t, d, s, x, x0, mach, N=20):
         """Returns a spectrum on the provided velocity axis."""
+
+        # Choose the correct velocity axis to calculate the profile on.
+
+        if self.oversample:
+            xx = np.linspace(x[0], x[-1], x.size * N)
+        else:
+            xx = x
+
+        # Calculate the correct widths to generate the line with.
+        # dV_int is the intrinsic linewidth and should be used to calculate
+        # any of the excitation conditions.
+
         vbeam = self.vbeam[abs(self.trans - j).argmin()] / self.soundspeed(t)
         if self.logmach:
             dV_int = self.linewidth(t, np.power(10, mach))
@@ -304,17 +321,25 @@ class fitdict:
             dV_obs = self.linewidth(t, mach + vbeam)
         dV_obs *= self.vdeproj[abs(self.trans - j).argmin()]
 
-        # Gaussian line profile.
+        # Generate the initial spectrum, either as a simple Gaussian or with
+        # the more accurate profile accounting for the optical depth.
+
         if not self.thick:
             Tb = self.grid.intensity(j, dV_int, t, d, s)
-            return self.gaussian(x, x0, dV_obs, Tb)
-
-        # Partially opticaly thick line profile.
+            s = self.gaussian(xx, x0, dV_obs, Tb)
         else:
             Tex = self.grid.Tex(j, dV_int, t, d, s)
             tau = self.grid.tau(j, dV_int, t, d, s)
             nu = self.freq[abs(self.trans - j).argmin()]
-            return self.thickline(x, x0, dV_obs, Tex, tau, nu)
+            s = self.thickline(xx, x0, dV_obs, Tex, tau, nu)
+
+        # Include the oversampling if necessary. First average down to the
+        # correct sampling rate and then smooth with a Hanning window.
+
+        if self.oversample:
+            s = interp1d(xx, s)(x)
+            s = np.convolve(s, [0.25, 0.5, 0.25])[1:-1]
+        return s
 
     def thickline(self, x, x0, dx, Tex, tau, nu):
         """Returns an optically thick line profile."""
