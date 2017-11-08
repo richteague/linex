@@ -445,8 +445,8 @@ class fitdict:
         """Run emcee with multiple runs to make the final nice."""
 
         nwalkers = kwargs.get('nwalkers', 400)
-        nburnin1 = kwargs.get('nburnin1', 500)
-        nburnin2 = kwargs.get('nburnin2', 500)
+        nburnin1 = kwargs.get('nburnin1', 300)
+        nburnin2 = kwargs.get('nburnin2', 200)
         nsteps = kwargs.get('nsteps', 100)
         p0 = kwargs.get('p0', None)
 
@@ -468,9 +468,13 @@ class fitdict:
         if self.verbose:
             print("Initial burn-in...")
         pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin1)
-        pos = pos[np.argmax(lp)] + 1e-4 * np.random.randn(nwalkers, self.ndim)
+        pcnts = self._getpercentiles(sampler)
+        pos = [np.random.uniform(p[0], p[-1], nwalkers) for p in pcnts]
+        pos = np.array(pos).T
+
         if self.diagnostics:
             plotsampling(sampler, self.params, title='Initial Burn-In')
+
         sampler.reset()
 
         if self.verbose:
@@ -496,6 +500,12 @@ class fitdict:
             print("Production complete in %s." % t)
 
         return sampler, sampler.flatchain
+
+    def _getpercentiles(self, sampler, N=50):
+        """Returns the perncentiles of the final N steps."""
+        samples = sampler.chain[:, -50:]
+        samples = samples.reshape((-1, samples.shape[-1]))
+        return np.percentile(samples, [16, 50, 84], axis=0).T
 
     def _calculatetheta(self, sampler, method='median'):
         """Returns the best fit parameters given the provided method."""
