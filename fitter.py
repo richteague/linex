@@ -286,9 +286,9 @@ class fitdict:
 
         # Noise properties.
         if self.GP:
-            if not all([-5. < s < 0. for s in sigs]):
+            if not all([-5. < s < 2. for s in sigs]):
                 return -np.inf
-            if not all([-5. < c < 0. for c in corrs]):
+            if not all([-5. < c < 2. for c in corrs]):
                 return -np.inf
         return 0.0
 
@@ -298,7 +298,7 @@ class fitdict:
         return [self._spectrum(j, t, d, s, v, x[i], m[i % len(m)])
                 for i, (j, v) in enumerate(zip(self.trans, self.velaxs))]
 
-    def _spectrum(self, j, t, d, s, x, x0, mach, N=6):
+    def _spectrum(self, j, t, d, s, x, x0, mach, N=10):
         """Returns a spectrum on the provided velocity axis."""
 
         # Choose the correct velocity axis to calculate the profile on.
@@ -445,8 +445,8 @@ class fitdict:
         """Run emcee with multiple runs to make the final nice."""
 
         nwalkers = kwargs.get('nwalkers', 400)
-        nburnin1 = kwargs.get('nburnin1', 300)
-        nburnin2 = kwargs.get('nburnin2', 300)
+        nburnin1 = kwargs.get('nburnin1', 500)
+        nburnin2 = kwargs.get('nburnin2', 500)
         nsteps = kwargs.get('nsteps', 100)
         p0 = kwargs.get('p0', None)
 
