@@ -58,7 +58,10 @@ the posterior and used to plot the corner plot.
                           found.
 -- TODO:
 
-    1) Update this for a single spectral axis but multiple components.
+    1) Better implementation of the broadening due to the beam. This must
+       somehow broaden the line after the sampling. This can't use convolution
+       as this would suppress the peak too which has already been corrected.
+    2) Update this for a single spectral axis but multiple components.
 
 """
 
@@ -67,7 +70,6 @@ import emcee
 import george
 import numpy as np
 import scipy.constants as sc
-from scipy.interpolate import interp1d
 from linex.radexgridclass import radexgrid
 from george.kernels import ExpSquaredKernel as ExpSq
 from plotting import plotsampling
@@ -126,17 +128,26 @@ class fitdict:
 
         # Include addtional terms to model the observational effects.
         # With these variables, check to see if they're iterable, otherwise
-        # extend them into a list with length self.ntrans.
+        # extend them into a list with length self.ntrans. We can also include
+        # an uncertainty such that at each call a random value is sampled.
 
-        self.vbeam = self._makeiterable('vbeam', 0.0, **kwargs)
-        self.vdeproj = self._makeiterable('vdeproj', 1.0, **kwargs)
-        self.tdeproj = self._makeiterable('tdeproj', 1.0, **kwargs)
+        self._Wkern = self._makeiterable('Wkern', 0.0, **kwargs)
+        self._Hkern = self._makeiterable('Hkern', 0.0, **kwargs)
+        if any(self._Hkern) > 0.0:
+            self.beamsmear = True
+        else:
+            self.beamsmear = False
+
+        # self.vbeam = self._makeiterable('vbeam', 0.0, **kwargs)
+        # self.dvbeam = self._makeiterable('dvbeam', 0.0, **kwargs)
+        # self.tbeam = self._makeiterable('tbeam', 1.0, **kwargs)
+        # self.dtbeam = self._makeiterable('dtbeam', 0.0, **kwargs)
+
+        self.oversample = kwargs.get('oversample', True)
 
         self.thick = kwargs.get('thick', False)
         if self.thick and not self.grid.hastau:
             raise ValueError("Attached grid does not have tau values.")
-
-        self.oversample = kwargs.get('oversample', True)
 
         # Set up the noise, estimating it in the spectrum and controlling the
         # noise model if requested.
@@ -155,12 +166,8 @@ class fitdict:
             print("Estimated RMS of each line:")
             for j, sig in zip(self.trans, self.rms):
                 print("  J = %d - %d: %.1f mK" % (j+1, j, 1e3 * sig))
-            if any(self.vbeam > 0.0):
+            if self.beamsmear:
                 print("Including a beam broadening term.")
-            if any(self.vdeproj != 1.0):
-                print("Including deprojection broadening term.")
-            if any(self.tdeproj != 1.0):
-                print("Including a brightness temperature scaling factor.")
             if self.laminar:
                 print("Assuming only thermal broadening.")
             if self.singlemach:
@@ -298,7 +305,7 @@ class fitdict:
         return [self._spectrum(j, t, d, s, v, x[i], m[i % len(m)])
                 for i, (j, v) in enumerate(zip(self.trans, self.velaxs))]
 
-    def _spectrum(self, j, t, d, s, x, x0, mach, N=10):
+    def _spectrum(self, j, t, d, s, x, x0, mach, N=100):
         """Returns a spectrum on the provided velocity axis."""
 
         # Choose the correct velocity axis to calculate the profile on.
@@ -308,37 +315,41 @@ class fitdict:
         else:
             xx = x
 
-        # Calculate the correct widths to generate the line with.
-        # dV_int is the intrinsic linewidth and should be used to calculate
-        # any of the excitation conditions.
+        j_idx = abs(self.trans - j).argmin()
 
-        vbeam = self.vbeam[abs(self.trans - j).argmin()] / self.soundspeed(t)
         if self.logmach:
-            dV_int = self.linewidth(t, np.power(10, mach))
-            dV_obs = self.linewidth(t, np.power(10, mach) + vbeam)
+            dV = self.linewidth(t, np.power(10, mach))
         else:
-            dV_int = self.linewidth(t, mach)
-            dV_obs = self.linewidth(t, mach + vbeam)
-        dV_obs *= self.vdeproj[abs(self.trans - j).argmin()]
+            dV = self.linewidth(t, mach)
 
         # Generate the initial spectrum, either as a simple Gaussian or with
         # the more accurate profile accounting for the optical depth.
 
         if not self.thick:
-            Tb = self.grid.intensity(j, dV_int, t, d, s)
-            s = self.gaussian(xx, x0, dV_obs, Tb)
+            Tb = self.grid.intensity(j, dV, t, d, s)
+            s = self.gaussian(xx, x0, dV, Tb)
         else:
-            Tex = self.grid.Tex(j, dV_int, t, d, s)
-            tau = self.grid.tau(j, dV_int, t, d, s)
-            nu = self.freq[abs(self.trans - j).argmin()]
-            s = self.thickline(xx, x0, dV_obs, Tex, tau, nu)
+            Tex = self.grid.Tex(j, dV, t, d, s)
+            tau = self.grid.tau(j, dV, t, d, s)
+            nu = self.freq[j_idx]
+            s = self.thickline(xx, x0, dV, Tex, tau, nu)
 
-        # Include the oversampling if necessary. First average down to the
-        # correct sampling rate and then smooth with a Hanning window.
+        # Downsample and apply Hanning smooth.
 
         if self.oversample:
-            s = interp1d(xx, s)(x)
-            s = np.convolve(s, [0.25, 0.5, 0.25])[1:-1]
+            s = np.interp(x, x, s[N/2::N])
+            s = np.convolve(s, [0.25, 0.5, 0.25], mode='same')
+
+        # Include the smearing due to the beam through a convolution.
+
+        if self.beamsmear:
+            W = self._Wkern[j_idx]
+            H = self._Hkern[j_idx]
+            npix = int(x.size * 0.3)
+            window = np.arange(-npix, npix+1)
+            window = H * np.exp(-np.power(window * np.diff(x)[0] / W, 2))
+            s = np.convolve(s, window, mode='same')
+
         return s
 
     def thickline(self, x, x0, dx, Tex, tau, nu):
@@ -446,8 +457,8 @@ class fitdict:
 
         nwalkers = kwargs.get('nwalkers', 400)
         nburnin1 = kwargs.get('nburnin1', 300)
-        nburnin2 = kwargs.get('nburnin2', 200)
-        nsteps = kwargs.get('nsteps', 100)
+        nburnin2 = kwargs.get('nburnin2', 100)
+        nsteps = kwargs.get('nsteps', 50)
         p0 = kwargs.get('p0', None)
 
         # For the initial positions, unless they are provided through the p0
