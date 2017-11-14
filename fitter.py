@@ -119,7 +119,7 @@ class fitdict:
         # Control the type of turbulence we want to model.
 
         self.laminar = kwargs.get('laminar', False)
-        self.logmach = kwargs.get('logmach', False)
+        self.logmach = kwargs.get('logmach', True)
         self.singlemach = kwargs.get('singlemach', True)
         if self.logmach and self.laminar:
             self.logmach = False
@@ -137,15 +137,9 @@ class fitdict:
             self.beamsmear = True
         else:
             self.beamsmear = False
-
-        # self.vbeam = self._makeiterable('vbeam', 0.0, **kwargs)
-        # self.dvbeam = self._makeiterable('dvbeam', 0.0, **kwargs)
-        # self.tbeam = self._makeiterable('tbeam', 1.0, **kwargs)
-        # self.dtbeam = self._makeiterable('dtbeam', 0.0, **kwargs)
-
         self.oversample = kwargs.get('oversample', True)
 
-        self.thick = kwargs.get('thick', False)
+        self.thick = kwargs.get('thick', True)
         if self.thick and not self.grid.hastau:
             raise ValueError("Attached grid does not have tau values.")
 
@@ -457,7 +451,7 @@ class fitdict:
 
         nwalkers = kwargs.get('nwalkers', 400)
         nburnin1 = kwargs.get('nburnin1', 300)
-        nburnin2 = kwargs.get('nburnin2', 100)
+        nburnin2 = kwargs.get('nburnin2', 200)
         nsteps = kwargs.get('nsteps', 50)
         p0 = kwargs.get('p0', None)
 
