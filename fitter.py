@@ -164,7 +164,7 @@ class fitdict:
                 print("Including a beam broadening term.")
             if self.laminar:
                 print("Assuming only thermal broadening.")
-            if self.singlemach:
+            if not self.singlemach:
                 print("Fitting individual non-thermal width components.")
             if self.logmach:
                 print("Fitting for log-Mach.")
@@ -368,13 +368,14 @@ class fitdict:
         models = self._calculatemodels(theta)
         if not self.GP:
             return self._chisquared(models)
-        noises = self._calculatenoises(theta)
-        for k, x, dy in zip(noises, self.velaxs, self.rms):
-            k.compute(x, dy)
         lnx2 = 0.0
-        for k, mod, obs in zip(noises, models, self.spectra):
-            lnx2 += k.lnlikelihood(mod - obs)
-        return lnx2
+        _, _, _, _, _, sigs, corrs = self._parse(theta)
+        for i in range(self.ntrans):
+            rho = np.power(10, 2. * sigs[i]) * ExpSq(np.power(10, corrs[i]))
+            noise = george.GP(rho)
+            noise.compute(self.velaxs[i], self.rms[i])
+            lnx2 += noise.log_likelihood(models[i] - self.spectra[i])
+        return np.nansum(lnx2)
 
     def _calculatenoises(self, theta):
         """Return the noise models."""

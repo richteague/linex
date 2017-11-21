@@ -53,8 +53,8 @@ def plotobservations(trans, velaxs, spectra, rms, ax=None):
     if ax is None:
         fig, ax = plt.subplots()
     for i, t in enumerate(trans):
-        l = ax.plot(velaxs[i], spectra[i], lw=1.25,
-                    label=r'J = %d - %d' % (t+1, t))
+        l = ax.step(velaxs[i], spectra[i], lw=1.25,
+                    label=r'J = %d - %d' % (t+1, t), where='mid')
         ax.fill_between(velaxs[i],
                         spectra[i] - 3.0 * rms[i],
                         spectra[i] + 3.0 * rms[i],
@@ -71,7 +71,16 @@ def plotbestfit(trans, velaxs, models, ax=None):
     """Plot the best-fit spectra."""
     if ax is None:
         fig, ax = plt.subplots()
-    for x, y, J in zip(velaxs, models, trans):
-        ax.scatter(x, y, color='r', edgecolor='k')
+        colors = ['k']
+    else:
+        colors = [l.get_color() for l in ax.lines]
+
+    # Draw the lines.
+    for x, y, J, c in zip(velaxs, models, trans, colors):
+        ax.scatter(x, y, color=c, edgecolor='k', zorder=100)
     ax.legend(fontsize=6)
+
+    # Center the axes on the line.
+    x0 = np.average([x[m.argmax()] for x, m in zip(velaxs, models)])
+    ax.set_xlim(x0-0.75, x0+0.75)
     return ax
