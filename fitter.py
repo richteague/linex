@@ -131,13 +131,25 @@ class fitdict:
         # extend them into a list with length self.ntrans. We can also include
         # an uncertainty such that at each call a random value is sampled.
 
-        self._Wkern = self._makeiterable('Wkern', 0.0, **kwargs)
-        self._Hkern = self._makeiterable('Hkern', 0.0, **kwargs)
-        if any(self._Hkern) > 0.0:
-            self.beamsmear = True
-        else:
+        self._Wkern = kwargs.get('Wkern', None)
+        self._Hkern = kwargs.get('Hkern', None)
+        if (self._Wkern is None) != (self._Hkern is None):
+            raise ValueError("Specify both or neither of Wkern / Hkern.")
+        if self._Wkern is None:
             self.beamsmear = False
+        else:
+            self.beamsmear = True
+            self._Wkern = np.squeeze(self._Wkern)
+            self._Hkern = np.squeeze(self._Hkern)
+            if self._Wkern.shape != self._Hkern.shape:
+                raise ValueError("Wrong shape kernel percentiles.")
+            if self._Wkern.ndim != 2:
+                raise ValueError("Wrong shape kernel percentiles.")
+            if self._Wkern.shape[0] != self.ntrans:
+                raise ValueError("Not enough transitions specified.")
+
         self.oversample = kwargs.get('oversample', True)
+        self.hanning = kwargs.get('hanning', True)
 
         self.thick = kwargs.get('thick', True)
         if self.thick and not self.grid.hastau:
@@ -175,7 +187,9 @@ class fitdict:
             if self.thick:
                 print("Including opacity in line profile calculation.")
             if self.oversample:
-                print("Oversampling the profile and smoothing the data.")
+                print("Oversampling the line profile.")
+            if self.hanning:
+                print("Including a Hanning smoothing of the data.")
             print("\n")
         self.diagnostics = kwargs.get('diagnostics', False)
 
@@ -332,14 +346,16 @@ class fitdict:
 
         if self.oversample:
             s = np.interp(x, x, s[N/2::N])
+
+        if self.hanning:
             s = np.convolve(s, [0.25, 0.5, 0.25], mode='same')
 
         # Include the smearing due to the beam through a convolution.
 
         if self.beamsmear:
-            W = self._Wkern[j_idx]
-            H = self._Hkern[j_idx]
-            npix = int(x.size * 0.3)
+            W = self.random_from_percentiles(self._Wkern[j_idx])
+            H = self.random_from_percentiles(self._Hkern[j_idx])
+            npix = int(x.size * 0.2)
             window = np.arange(-npix, npix+1)
             window = H * np.exp(-np.power(window * np.diff(x)[0] / W, 2))
             s = np.convolve(s, window, mode='same')
@@ -450,8 +466,8 @@ class fitdict:
     def emcee(self, **kwargs):
         """Run emcee with multiple runs to make the final nice."""
 
-        nwalkers = kwargs.get('nwalkers', 400)
-        nburnin1 = kwargs.get('nburnin1', 300)
+        nwalkers = kwargs.get('nwalkers', 500)
+        nburnin1 = kwargs.get('nburnin1', 500)
         nburnin2 = kwargs.get('nburnin2', 200)
         nsteps = kwargs.get('nsteps', 50)
         p0 = kwargs.get('p0', None)
@@ -502,7 +518,7 @@ class fitdict:
                         self.bestfitmodels(sampler), ax=ax)
             plotcorner(sampler, self.params)
         if self.verbose:
-            t = self.hmsformat(time.time()-t0)
+            t = self.hmsformat(time.time() - t0)
             print("Production complete in %s." % t)
 
         return sampler, sampler.flatchain
@@ -558,3 +574,11 @@ class fitdict:
         m, s = divmod(time, 60)
         h, m = divmod(m, 60)
         return "%d:%02d:%02d" % (h, m, s)
+
+    def random_from_percentiles(self, pcnts):
+        """Draw from a distribution described by [16, 50, 84] percentiles."""
+        rnd = np.random.randn()
+        if rnd < 0.0:
+            return pcnts[1] + rnd * (pcnts[1] - pcnts[0])
+        else:
+            return pcnts[1] + rnd * (pcnts[2] - pcnts[1])
