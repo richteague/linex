@@ -41,7 +41,7 @@ class spectrum:
         x0 = self.velax[self.spectrum.argmax()]
         dx = 0.3
         Tb = self.spectrum.max()
-        return curve_fit(self.Gaussian, x, y, p0=[x0, dx, Tb])[0]
+        return curve_fit(self.Gaussian, x, y, p0=[x0, dx, Tb], maxfev=10000)[0]
 
     def Gaussian(self, x, x0, dx, Tb):
         """Gaussian function, dx is the standard deviation."""

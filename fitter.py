@@ -168,10 +168,10 @@ class fitdict:
         # Output messages.
 
         if self.verbose:
-            print("\n")
             print("Estimated RMS of each line:")
             for j, sig in zip(self.trans, self.rms):
                 print("  J = %d - %d: %.1f mK" % (j+1, j, 1e3 * sig))
+            print("\n")
             if self.beamsmear:
                 print("Including a beam broadening term.")
             if self.laminar:
@@ -355,11 +355,10 @@ class fitdict:
         if self.beamsmear:
             W = self.random_from_percentiles(self._Wkern[j_idx])
             H = self.random_from_percentiles(self._Hkern[j_idx])
-            npix = int(x.size * 0.2)
-            window = np.arange(-npix, npix+1)
-            window = H * np.exp(-np.power(window * np.diff(x)[0] / W, 2))
-            s = np.convolve(s, window, mode='same')
-
+            if W > 0.0 and H > 0.0:
+                npix = np.floor(0.3 / np.diff(x)[0])
+                kern = np.exp(-np.power(np.arange(-npix, npix+1) / W, 2))
+                s = np.convolve(s, kern, mode='same') / H
         return s
 
     def thickline(self, x, x0, dx, Tex, tau, nu):
@@ -466,9 +465,9 @@ class fitdict:
     def emcee(self, **kwargs):
         """Run emcee with multiple runs to make the final nice."""
 
-        nwalkers = kwargs.get('nwalkers', 500)
-        nburnin1 = kwargs.get('nburnin1', 500)
-        nburnin2 = kwargs.get('nburnin2', 200)
+        nwalkers = kwargs.get('nwalkers', 300)
+        nburnin1 = kwargs.get('nburnin1', 150)
+        nburnin2 = kwargs.get('nburnin2', 50)
         nsteps = kwargs.get('nsteps', 50)
         p0 = kwargs.get('p0', None)
 
