@@ -28,13 +28,15 @@ noise with Gaussian Processes with george.
     fixn [float]        - Fix the volume density to that value. Note that LTE
                           will override this.
     fixN [float]        - Fix the column density to that value.
-    vbeam [float]       - Additional non-thermal term to account for beamsize.
-    vdeproj [float]     - Broadening factor induced by the azimuthal averaging.
-                          It must be equal to or larger than 1.
-    tdeproj [float]     - Rescale the model spectra by this factor to account
-                          for the loss in peak from azimuthal averaging.
+    Wkern [floats]      - [16, 50, 84]th percentiles of the kernel width used
+                          for broadening the line to account for the beam.
+    Hkern [floats]      - [16, 50, 84]th percentiles of the kernel height used
+                          for broadening the line to account for the beam.
     thick [bool]        - Use a line profile assuming tau is Gaussian.
     oversample [bool]   - Oversample the profile and include Hanning smoothing.
+    fluxval [float]     - If specified, the estimated flux calibration
+                          uncertainty as a fraction. This value will be used as
+                          the prior.
 
 The MCMC is set up to run relatively well with the default settings. Burn-in is
 performed in two steps, the first starts from random positions allowed by the
@@ -48,9 +50,15 @@ the posterior and used to plot the corner plot.
 
     nwalkers [int]      - Number of walkers. More walkers is much, much better
                           than more steps.
-    nburnin1 [int]      - Number of steps for the intial stage of burn-in.
-    nburnin2 [int]      - Number of steps for the second stage of burn-in.
-    nsteps [int]        - Number of steps used for the posterior sampling.
+    nburns [int]        - Number of burn-ins before running the production. If
+                          nburns > 1, the for the second and further burn-ins,
+                          the starting position is sampled from the ending of
+                          the last burn-in. This aims to remove walkers stuck
+                          in local minima.
+    burnin_sample [int] - Number of steps to sample in order to re-run the next
+                          burn-in period if nburns > 1.
+    burnin_steps [int]  - Number of steps taken in each burn-in.
+    sample_steps [int]  - Number of steps taken for the production run.
     p0 [list]           - Starting positions for the emcee. If not specified
                           then random positions across the entire grid will be
                           chosen. While this allows one to explore the whole
@@ -58,9 +66,7 @@ the posterior and used to plot the corner plot.
                           found.
 -- TODO:
 
-    1) Better implementation of the broadening due to the beam. This must
-       somehow broaden the line after the sampling. This can't use convolution
-       as this would suppress the peak too which has already been corrected.
+    1) Tidy up.
     2) Update this for a single spectral axis but multiple components.
 
 """
@@ -148,6 +154,13 @@ class fitdict:
             if self._Wkern.shape[0] != self.ntrans:
                 raise ValueError("Not enough transitions specified.")
 
+        # Specify the flux calibration uncertainty. If True will default to 10%
+        # otherwise any value can be used. This will be used in the priors.
+
+        self.fluxcal = kwargs.get('fluxcal', False)
+        if self.fluxcal and type(self.fluxcal) is bool:
+            self.fluxcal = 0.1
+
         self.oversample = kwargs.get('oversample', True)
         self.hanning = kwargs.get('hanning', True)
 
@@ -179,9 +192,9 @@ class fitdict:
             if not self.singlemach:
                 print("Fitting individual non-thermal width components.")
             if self.logmach:
-                print("Fitting for log-Mach.")
+                print("Fitting for the logarithm of Mach.")
             if self.lte:
-                print("Assuming LTE.")
+                print("Assuming local thermodynamic equilibrium.")
             if self.GP:
                 print("Using Gaussian processes to model noise.")
             if self.thick:
@@ -190,6 +203,8 @@ class fitdict:
                 print("Oversampling the line profile.")
             if self.hanning:
                 print("Including a Hanning smoothing of the data.")
+            if self.fluxcal:
+                print("Fitting for flux calibration.")
             print("\n")
         self.diagnostics = kwargs.get('diagnostics', False)
 
@@ -231,13 +246,16 @@ class fitdict:
             self.params += ['x0_%d' % i]
             if self.GP:
                 self.params += ['sig_%d' % i, 'vcorr_%d' % i]
+        for i in range(len(self.trans)):
+            if self.fluxcal:
+                self.params += ['fc_%d' % i]
         if self.laminar:
             self.params = [p for p in self.params if 'mach' not in p]
         self.ndim = len(self.params)
         return
 
     def _parse(self, theta):
-        """Parses theta into {temp, dens, sigma, mach, x0s, sigs, corrs}."""
+        """Parses theta into properties."""
         zipped = zip(theta, self.params)
         if self.fixT:
             temp = self.fixT + self.dT * np.random.randn()
@@ -264,9 +282,11 @@ class fitdict:
         else:
             sigs = [np.nan for _ in range(self.ntrans)]
             corrs = [np.nan for _ in range(self.ntrans)]
-        return temp, dens, sigma, mach, x0s, sigs, corrs
-
-    # Fitting with standard chi-squared likelihood function.
+        if self.fluxcal:
+            fc = [t for t, n in zipped if 'fc_' in n]
+        else:
+            fc = [1.0 for _ in range(self.ntrans)]
+        return temp, dens, sigma, mach, x0s, sigs, corrs, fc
 
     def _lnprob(self, theta):
         """Log-probability function with simple chi-squared likelihood."""
@@ -277,7 +297,7 @@ class fitdict:
 
     def _lnprior(self, theta):
         """Log-prior function. Uninformative priors."""
-        temp, dens, sigma, mach, x0s, sigs, corrs = self._parse(theta)
+        temp, dens, sigma, mach, x0s, sigs, corrs, fc = self._parse(theta)
 
         # Excitation parameters.
         if not self.grid.in_grid(temp, 'temp'):
@@ -305,15 +325,21 @@ class fitdict:
                 return -np.inf
             if not all([-5. < c < 2. for c in corrs]):
                 return -np.inf
+
+        # Flux calibration uncertainty.
+        if self.fluxcal:
+            if not all([abs(1. - f) < self.fluxcal for f in fc]):
+                return -np.inf
+
         return 0.0
 
     def _calculatemodels(self, theta):
         """Calculates the appropriate models."""
-        t, d, s, m, x, _, _ = self._parse(theta)
-        return [self._spectrum(j, t, d, s, v, x[i], m[i % len(m)])
+        t, d, s, m, x, _, _, f = self._parse(theta)
+        return [self._spectrum(j, t, d, s, v, x[i], m[i % len(m)], f[i])
                 for i, (j, v) in enumerate(zip(self.trans, self.velaxs))]
 
-    def _spectrum(self, j, t, d, s, x, x0, mach, N=100):
+    def _spectrum(self, j, t, d, s, x, x0, mach, f, N=100):
         """Returns a spectrum on the provided velocity axis."""
 
         # Choose the correct velocity axis to calculate the profile on.
@@ -342,29 +368,45 @@ class fitdict:
             nu = self.freq[j_idx]
             s = self.thickline(xx, x0, dV, Tex, tau, nu)
 
-        # Downsample and apply Hanning smooth.
-
         if self.oversample:
             s = np.interp(x, x, s[N/2::N])
 
         if self.hanning:
             s = np.convolve(s, [0.25, 0.5, 0.25], mode='same')
 
-        # Include the smearing due to the beam through a convolution.
+        if self.fluxcal:
+            s *= f
 
         if self.beamsmear:
             W = self.random_from_percentiles(self._Wkern[j_idx])
             H = self.random_from_percentiles(self._Hkern[j_idx])
             if W > 0.0 and H > 0.0:
-                npix = np.floor(0.3 / np.diff(x)[0])
-                kern = np.exp(-np.power(np.arange(-npix, npix+1) / W, 2))
-                s = np.convolve(s, kern, mode='same') / H
+                s = self.convolve_spectrum(s, W, H)
         return s
 
     def thickline(self, x, x0, dx, Tex, tau, nu):
         """Returns an optically thick line profile."""
         Tb = self._calculateTb(Tex, nu)
         return Tb * (1. - np.exp(-self.gaussian(x, x0, dx, tau)))
+
+    def convolve_spectrum(self, x, W, H):
+        """Convolve array x with Hanning kernel of width W and height H."""
+        Wa, Wb = int(np.floor(W)), int(np.ceil(W))
+        ya, yb = self._convolve(x, Wa, H), self._convolve(x, Wb, H)
+        if np.isclose(Wa, W):
+            return ya
+        elif np.isclose(Wb, W):
+            return yb
+        weight = [W - float(Wa), float(Wb) - W]
+        return np.average([ya, yb], weights=weight, axis=0)
+
+    def _convolve(self, x, W, H):
+        """Single convolution function."""
+        K = np.hanning(W)
+        K *= H / np.sum(K)
+        y = [np.convolve(x, K, mode='same'),
+             np.convolve(x[::-1], K, mode='same')[::-1]]
+        return np.average(y, axis=0)
 
     def _sourcefunction(self, T, nu):
         """Source function of the line."""
@@ -384,7 +426,7 @@ class fitdict:
         if not self.GP:
             return self._chisquared(models)
         lnx2 = 0.0
-        _, _, _, _, _, sigs, corrs = self._parse(theta)
+        _, _, _, _, _, sigs, corrs, _ = self._parse(theta)
         for i in range(self.ntrans):
             rho = np.power(10, 2. * sigs[i]) * ExpSq(np.power(10, corrs[i]))
             noise = george.GP(rho)
@@ -394,7 +436,7 @@ class fitdict:
 
     def _calculatenoises(self, theta):
         """Return the noise models."""
-        _, _, _, _, _, sigs, corrs = self._parse(theta)
+        _, _, _, _, _, sigs, corrs, _ = self._parse(theta)
         return [george.GP(np.power(10, s)**2 * ExpSq(10**c))
                 for s, c in zip(sigs, corrs)]
 
@@ -434,41 +476,23 @@ class fitdict:
             if self.GP:
                 pos += [np.random.uniform(-3, -1, nwalkers)]
                 pos += [np.random.uniform(-3, -1, nwalkers)]
+
+        # Flux calibration.
+        if self.fluxcal:
+            fc = self.fluxcal
+            for i in range(self.ntrans):
+                pos += [np.random.uniform(1 - fc, 1. + fc, nwalkers)]
+
         return pos
-
-    def emcee_single(self, **kwargs):
-        """Run emcee with just one big sample."""
-        nwalkers = kwargs.get('nwalkers', 500)
-        nburnin = kwargs.get('nburnin', 100)
-        nsteps = kwargs.get('nsteps', 400)
-
-        if self.verbose:
-            t0 = time.time()
-        sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self._lnprob)
-        pos = self._startingpositions(nwalkers)
-        sampler.run_mcmc(np.squeeze(pos).T, nburnin+nsteps)
-        if self.verbose:
-            t = self.hmsformat(time.time()-t0)
-            print("Production complete in %s." % t)
-
-        if self.diagnostics:
-            plotsampling(sampler, self.params, title='Production')
-            ax = plotobservations(self.trans, self.velaxs,
-                                  self.spectra, self.rms)
-            plotbestfit(self.trans, self.velaxs,
-                        self.bestfitmodels(sampler), ax=ax)
-            plotcorner(sampler, self.params)
-
-        samples = sampler.chain[:, nburnin:]
-        return samples.reshape(-1, samples.shape[-1]).T
 
     def emcee(self, **kwargs):
         """Run emcee with multiple runs to make the final nice."""
 
         nwalkers = kwargs.get('nwalkers', 300)
-        nburnin1 = kwargs.get('nburnin1', 150)
-        nburnin2 = kwargs.get('nburnin2', 50)
-        nsteps = kwargs.get('nsteps', 50)
+        nburns = kwargs.get('nburns', 1)
+        burnin_steps = kwargs.get('burnin_steps', 200)
+        burnin_sample = kwargs.get('burnin_sample', 20)
+        sample_steps = kwargs.get('sample_steps', 50)
         p0 = kwargs.get('p0', None)
 
         # For the initial positions, unless they are provided through the p0
@@ -478,6 +502,7 @@ class fitdict:
         t0 = time.time()
         sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self._lnprob)
 
+        # Initial burn in to find the parameters.
         if p0 is None:
             pos = self._startingpositions(nwalkers)
         else:
@@ -486,28 +511,24 @@ class fitdict:
                 raise ValueError("Wrong number of starting positions.")
             pos = (pos + 1e-4 * np.random.randn(nwalkers, self.ndim)).T
 
-        if self.verbose:
-            print("Initial burn-in...")
-        pos, lp, _ = sampler.run_mcmc(np.squeeze(pos).T, nburnin1)
-        pcnts = self._getpercentiles(sampler)
-        pos = [np.random.uniform(p[0], p[-1], nwalkers) for p in pcnts]
-        pos = np.array(pos).T
+        # Run the number of burn-ins requested. After each burn-in, resample
+        # the walkers around the percentiles of the last 20 samples.
 
-        if self.diagnostics:
-            plotsampling(sampler, self.params, title='Initial Burn-In')
+        for burn in range(nburns):
+            if self.verbose:
+                print("Running burn-in part %d of %d..." % (burn + 1, nburns))
+            _, _, _ = sampler.run_mcmc(np.squeeze(pos).T, burnin_steps)
+            pos = self._resample_posterior(sampler, nwalkers, N=burnin_sample)
+            if self.diagnostics:
+                plotsampling(sampler, self.params,
+                             title='Burn-In %d' % (burn + 1))
+            sampler.reset()
 
-        sampler.reset()
-
-        if self.verbose:
-            print("Running main burn-in...")
-        pos, _, _ = sampler.run_mcmc(pos, nburnin2)
-        if self.diagnostics:
-            plotsampling(sampler, self.params, title='Main Burn-In')
-
+        # Run the production samples.
         if self.verbose:
             print("Running productions...")
         sampler = emcee.EnsembleSampler(nwalkers, self.ndim, self._lnprob)
-        pos, _, _ = sampler.run_mcmc(pos, nsteps)
+        pos, _, _ = sampler.run_mcmc(np.squeeze(pos).T, sample_steps)
 
         if self.diagnostics:
             plotsampling(sampler, self.params, title='Production')
@@ -521,6 +542,14 @@ class fitdict:
             print("Production complete in %s." % t)
 
         return sampler, sampler.flatchain
+
+    def _resample_posterior(self, sampler, nwalkers, N=20):
+        """Resample the walkers given the sampler."""
+        percentiles = self._getpercentiles(sampler, N=N)
+        pos = [[self.random_from_percentiles(param)
+                for _ in range(nwalkers)]
+               for param in percentiles]
+        return np.array(pos)
 
     def _getpercentiles(self, sampler, N=50):
         """Returns the perncentiles of the final N steps."""

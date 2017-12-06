@@ -43,7 +43,7 @@ def plotsampling(sampler, params, color='dodgerblue', title=None):
 
 def plotcorner(sampler, params):
     """Plot the corner plot."""
-    corner.corner(sampler.flatchain, labels=params,
+    corner.corner(sampler.flatchain, labels=params, bins=50,
                   quantiles=[0.16, 0.5, 0.84], show_titles=True)
     return
 
