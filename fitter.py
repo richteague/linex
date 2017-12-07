@@ -404,6 +404,9 @@ class fitdict:
         """Single convolution function."""
         K = np.hanning(W)
         K *= H / np.sum(K)
+        K = K[K > 0.0]
+        if len(K) <= 1:
+            return x
         y = [np.convolve(x, K, mode='same'),
              np.convolve(x[::-1], K, mode='same')[::-1]]
         return np.average(y, axis=0)
@@ -490,8 +493,8 @@ class fitdict:
 
         nwalkers = kwargs.get('nwalkers', 300)
         nburns = kwargs.get('nburns', 1)
-        burnin_steps = kwargs.get('burnin_steps', 200)
-        burnin_sample = kwargs.get('burnin_sample', 20)
+        burnin_steps = kwargs.get('burnin_steps', 300)
+        burnin_sample = kwargs.get('burnin_sample', 50)
         sample_steps = kwargs.get('sample_steps', 50)
         p0 = kwargs.get('p0', None)
 
