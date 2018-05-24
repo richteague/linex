@@ -3,7 +3,6 @@ Class for the pre-calculated RADEX grids calcualted with `get_radex_grid.py`.
 Provides the functions to interpolate the grid and return the intensity,
 integrated intensity and the optical depth at the line centre. It also contains
 some helper functions for running emcee models.
-
 """
 
 import os

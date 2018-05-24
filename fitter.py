@@ -73,11 +73,11 @@ the posterior and used to plot the corner plot.
 
 import time
 import emcee
-import george
+import celerite
 import numpy as np
 import scipy.constants as sc
 from linex.radexgridclass import radexgrid
-from george.kernels import ExpSquaredKernel as ExpSq
+from celerite.terms import Matern32Term as M32
 from plotting import plotsampling
 from plotting import plotcorner
 from plotting import plotobservations
@@ -164,6 +164,12 @@ class fitdict:
         self.oversample = kwargs.get('oversample', True)
         self.hanning = kwargs.get('hanning', True)
 
+        # Decide whether to include beam dilution as a free parameter.
+        # This will be applied to all lines homogeneously (assumes they have
+        # the same beam sizes and underlying emission structure).
+
+        self.beam_dilution = kwargs.get('beam_dilution', False)
+
         self.thick = kwargs.get('thick', True)
         if self.thick and not self.grid.hastau:
             raise ValueError("Attached grid does not have tau values.")
@@ -172,6 +178,10 @@ class fitdict:
         # noise model if requested.
 
         self.rms = self._estimatenoise()
+        zipped = zip(self.spectra, self.rms)
+        self.rms = [np.hypot(0.1 * Tb, rms) for Tb, rms in zipped]
+        self.rms = np.squeeze(self.rms)
+
         self.GP = kwargs.get('GP', kwargs.get('gp', False))
 
         # Populate the parameters to fit.
@@ -183,7 +193,7 @@ class fitdict:
         if self.verbose:
             print("Estimated RMS of each line:")
             for j, sig in zip(self.trans, self.rms):
-                print("  J = %d - %d: %.1f mK" % (j+1, j, 1e3 * sig))
+                print("J = %d - %d: %.1f mK" % (j+1, j, 1e3 * np.nanmean(sig)))
             print("\n")
             if self.beamsmear:
                 print("Including a beam broadening term.")
@@ -205,6 +215,8 @@ class fitdict:
                 print("Including a Hanning smoothing of the data.")
             if self.fluxcal:
                 print("Fitting for flux calibration.")
+            if self.beam_dilution:
+                print("Fitting for a beam filling factor.")
             print("\n")
         self.diagnostics = kwargs.get('diagnostics', False)
 
@@ -231,6 +243,8 @@ class fitdict:
     def _popparams(self):
         """Populates the free variables and the number of dimensions."""
         self.params = []
+
+        # Physical properties.
         if not self.fixT:
             self.params += ['temp']
         if not self.fixn and not self.lte:
@@ -244,19 +258,29 @@ class fitdict:
                 self.params += ['mach_%d' % i]
         for i in range(len(self.trans)):
             self.params += ['x0_%d' % i]
+
+            # Hyper-parameters for GPs.
             if self.GP:
                 self.params += ['sig_%d' % i, 'vcorr_%d' % i]
+
+        # Flux calibration.
         for i in range(len(self.trans)):
             if self.fluxcal:
                 self.params += ['fc_%d' % i]
         if self.laminar:
             self.params = [p for p in self.params if 'mach' not in p]
+
+        # Beam dilution.
+        if self.beam_dilution:
+            self.params += ['ff']
         self.ndim = len(self.params)
         return
 
     def _parse(self, theta):
         """Parses theta into properties."""
         zipped = zip(theta, self.params)
+
+        # Physical parameters.
         if self.fixT:
             temp = self.fixT + self.dT * np.random.randn()
         else:
@@ -276,17 +300,27 @@ class fitdict:
         else:
             mach = [0.0]
         x0s = [t for t, n in zipped if 'x0_' in n]
+
+        # Hyper-parameters for noise.
         if self.GP:
             sigs = [t for t, n in zipped if 'sig_' in n]
             corrs = [t for t, n in zipped if 'vcorr_' in n]
         else:
             sigs = [np.nan for _ in range(self.ntrans)]
             corrs = [np.nan for _ in range(self.ntrans)]
+
+        # Flux calibration.
         if self.fluxcal:
             fc = [t for t, n in zipped if 'fc_' in n]
         else:
             fc = [1.0 for _ in range(self.ntrans)]
-        return temp, dens, sigma, mach, x0s, sigs, corrs, fc
+
+        # Beam dilution.
+        if self.beam_dilution:
+            ff = [t for t, n in zipped if 'ff' in n][0]
+        else:
+            ff = 1.0
+        return temp, dens, sigma, mach, x0s, sigs, corrs, fc, ff
 
     def _lnprob(self, theta):
         """Log-probability function with simple chi-squared likelihood."""
@@ -297,7 +331,7 @@ class fitdict:
 
     def _lnprior(self, theta):
         """Log-prior function. Uninformative priors."""
-        temp, dens, sigma, mach, x0s, sigs, corrs, fc = self._parse(theta)
+        temp, dens, sigma, mach, x0s, sigs, corrs, fc, ff = self._parse(theta)
 
         # Excitation parameters.
         if not self.grid.in_grid(temp, 'temp'):
@@ -309,10 +343,10 @@ class fitdict:
 
         # Non-thermal broadening.
         if self.logmach:
-            if not all([-5.0 < m < 0.0 for m in mach]):
+            if not all([-5.0 < m < 5.0 for m in mach]):
                 return -np.inf
         else:
-            if not all([0.0 <= m < 0.5 for m in mach]):
+            if not all([0.0 <= m < 5.0 for m in mach]):
                 return -np.inf
 
         # Line centres.
@@ -331,15 +365,20 @@ class fitdict:
             if not all([abs(1. - f) < self.fluxcal for f in fc]):
                 return -np.inf
 
+        # Beam filling factor.
+        if self.beam_dilution:
+            if not 0.0 < ff <= 1.0:
+                return -np.inf
+
         return 0.0
 
     def _calculatemodels(self, theta):
         """Calculates the appropriate models."""
-        t, d, s, m, x, _, _, f = self._parse(theta)
-        return [self._spectrum(j, t, d, s, v, x[i], m[i % len(m)], f[i])
+        t, d, s, m, x, _, _, f, ff = self._parse(theta)
+        return [self._spectrum(j, t, d, s, v, x[i], m[i % len(m)], f[i], ff)
                 for i, (j, v) in enumerate(zip(self.trans, self.velaxs))]
 
-    def _spectrum(self, j, t, d, s, x, x0, mach, f, N=100):
+    def _spectrum(self, j, t, d, s, x, x0, mach, f, ff, N=100):
         """Returns a spectrum on the provided velocity axis."""
 
         # Choose the correct velocity axis to calculate the profile on.
@@ -356,23 +395,28 @@ class fitdict:
         else:
             dV = self.linewidth(t, mach)
 
+        # INCLUDE AN OPTICAL DEPTH PRIOR.
+        tau = self.grid.tau(j, dV, t, d, s)
+        if any(tau > 1.0):
+            return np.ones(x.size) * np.nan
+
         # Generate the initial spectrum, either as a simple Gaussian or with
         # the more accurate profile accounting for the optical depth.
 
         if not self.thick:
             Tb = self.grid.intensity(j, dV, t, d, s)
-            s = self.gaussian(xx, x0, dV, Tb)
+            s = self.gaussian(xx, x0, dV, Tb * ff)
         else:
             Tex = self.grid.Tex(j, dV, t, d, s)
-            tau = self.grid.tau(j, dV, t, d, s)
             nu = self.freq[j_idx]
-            s = self.thickline(xx, x0, dV, Tex, tau, nu)
+            s = self.thickline(xx, x0, dV, Tex, tau, nu, ff)
 
         if self.oversample:
             s = np.interp(x, x, s[N/2::N])
 
         if self.hanning:
-            s = np.convolve(s, [0.25, 0.5, 0.25], mode='same')
+            s = np.convolve(s, [0.5, 0.5], mode='same')
+            # s = np.convolve(s, [0.25, 0.5, 0.25], mode='same')
 
         if self.fluxcal:
             s *= f
@@ -384,10 +428,10 @@ class fitdict:
                 s = self.convolve_spectrum(s, W, H)
         return s
 
-    def thickline(self, x, x0, dx, Tex, tau, nu):
+    def thickline(self, x, x0, dx, Tex, tau, nu, ff):
         """Returns an optically thick line profile."""
         Tb = self._calculateTb(Tex, nu)
-        return Tb * (1. - np.exp(-self.gaussian(x, x0, dx, tau)))
+        return Tb * (1. - np.exp(-self.gaussian(x, x0, dx, tau))) * ff
 
     def convolve_spectrum(self, x, W, H):
         """Convolve array x with Hanning kernel of width W and height H."""
@@ -426,22 +470,21 @@ class fitdict:
     def _lnlike(self, theta):
         """Log-likelihood with chi-squared likelihood function."""
         models = self._calculatemodels(theta)
+
+        for model in models:
+            if any(np.isnan(model)):
+                return -np.inf
+
         if not self.GP:
             return self._chisquared(models)
         lnx2 = 0.0
-        _, _, _, _, _, sigs, corrs, _ = self._parse(theta)
+        _, _, _, _, _, sigs, corrs, _, _ = self._parse(theta)
         for i in range(self.ntrans):
-            rho = np.power(10, 2. * sigs[i]) * ExpSq(np.power(10, corrs[i]))
-            noise = george.GP(rho)
-            noise.compute(self.velaxs[i], self.rms[i])
-            lnx2 += noise.log_likelihood(models[i] - self.spectra[i])
+            rho = M32(log_sigma=sigs[i], log_rho=corrs[i])
+            gp = celerite.GP(rho)
+            gp.compute(self.velaxs[i], self.rms[i])
+            lnx2 += gp.log_likelihood(models[i] - self.spectra[i])
         return np.nansum(lnx2)
-
-    def _calculatenoises(self, theta):
-        """Return the noise models."""
-        _, _, _, _, _, sigs, corrs, _ = self._parse(theta)
-        return [george.GP(np.power(10, s)**2 * ExpSq(10**c))
-                for s, c in zip(sigs, corrs)]
 
     def _chisquared(self, models):
         """Chi-squared likelihoo function."""
@@ -458,7 +501,8 @@ class fitdict:
 
         # Excitation conditions.
         if not self.fixT:
-            pos += [self.grid.random_samples('temp', nwalkers)]
+            pos += [np.random.uniform(20, 40, nwalkers)]
+            # pos += [self.grid.random_samples('temp', nwalkers)]
         if not self.fixn and not self.lte:
             pos += [self.grid.random_samples('dens', nwalkers)]
         if not self.fixN:
@@ -477,14 +521,18 @@ class fitdict:
         for i in range(self.ntrans):
             pos += [self.x0s[i] + 1e-2 * np.random.randn(nwalkers)]
             if self.GP:
-                pos += [np.random.uniform(-3, -1, nwalkers)]
-                pos += [np.random.uniform(-3, -1, nwalkers)]
+                pos += [np.random.uniform(-3, -2, nwalkers)]
+                pos += [np.random.uniform(-3, -2, nwalkers)]
 
         # Flux calibration.
         if self.fluxcal:
             fc = self.fluxcal
             for i in range(self.ntrans):
                 pos += [np.random.uniform(1 - fc, 1. + fc, nwalkers)]
+
+        # Beam dilution.
+        if self.beam_dilution:
+            pos += [np.random.uniform(0.1, 1.0, nwalkers)]
 
         return pos
 
@@ -560,14 +608,17 @@ class fitdict:
         samples = samples.reshape((-1, samples.shape[-1]))
         return np.percentile(samples, [16, 50, 84], axis=0).T
 
-    def _calculatetheta(self, sampler, method='median'):
+    def _calculatetheta(self, sampler, method='random'):
         """Returns the best fit parameters given the provided method."""
         if method.lower() == 'median':
             return np.median(sampler.flatchain, axis=0)
         elif method.lower() == 'mean':
             return np.mean(sampler.flatchain, axis=0)
+        elif method.lower() == 'random':
+            idx = np.random.randint(0, sampler.flatchain.shape[0])
+            return sampler.flatchain[idx]
         else:
-            raise ValueError("Method must be 'median' or 'mean'.")
+            raise ValueError("Method must be 'median', 'mean' or 'random'.")
 
     def bestfitmodels(self, sampler):
         """Return the best-fit models."""
@@ -591,9 +642,9 @@ class fitdict:
         """Gaussian function. dx is the standard deviation."""
         return A * np.exp(-0.5 * np.power((x-x0)/dx, 2))
 
-    def samples2percentiles(self, samples):
+    def samples2percentiles(self, samples, percentiles=[16, 50, 84]):
         """Returns the [16th, 50th, 84th] percentiles of the samples."""
-        return np.array([np.percentile(s, [16, 50, 84]) for s in samples.T])
+        return np.percentile(samples, percentiles, axis=0).T
 
     def samples2uncertainties(self, samples):
         """Returns the percentiles in a [<y>, -dy, +dy] format."""

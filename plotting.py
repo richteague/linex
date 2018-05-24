@@ -43,7 +43,7 @@ def plotsampling(sampler, params, color='dodgerblue', title=None):
 
 def plotcorner(sampler, params):
     """Plot the corner plot."""
-    corner.corner(sampler.flatchain, labels=params, bins=50,
+    corner.corner(sampler.flatchain, labels=params,
                   quantiles=[0.16, 0.5, 0.84], show_titles=True)
     return
 
@@ -56,8 +56,8 @@ def plotobservations(trans, velaxs, spectra, rms, ax=None):
         l = ax.step(velaxs[i], spectra[i], lw=1.25,
                     label=r'J = %d - %d' % (t+1, t), where='mid')
         ax.fill_between(velaxs[i],
-                        spectra[i] - 3.0 * rms[i],
-                        spectra[i] + 3.0 * rms[i],
+                        spectra[i] - 1.0 * rms[i],
+                        spectra[i] + 1.0 * rms[i],
                         lw=0.0, alpha=0.2, color=l[0].get_color(),
                         zorder=-3)
     ax.set_xlim(-0.75, 0.75)

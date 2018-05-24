@@ -43,21 +43,23 @@ def runRADEX(species, widths, temperatures, densities, columns, **kwargs):
     # Check that the collisional rate file exists.
     # This is hardwired to where the collisional rates are.
 
-    rates_path = os.getenv('RADEX_DATAPATH')
+    rates_path = os.path.expanduser(os.getenv('RADEX_DATAPATH'))
+    print('{}/{}.dat'.format(rates_path, species))
     if not os.path.isfile('{}/{}.dat'.format(rates_path, species)):
-        raise ValueError('Not found collisional rates.')
+        raise ValueError('Did not find collisional rates.')
     rates = ratefile('{}/{}.dat'.format(rates_path, species))
 
     # We assume that the density is n(H2) and the ortho/para ratio is 3.
     # Check if oH2 and pH2 are valid colliders in the collisional rate file.
     # If they are, recalculate the densities.
 
-    opr = kwargs.get('opr', 3.)
-    if ('oH2' in rates.partners and 'pH2' in rates.partners):
+    opr = kwargs.get('opr', False)
+    if ('oH2' in rates.partners and 'pH2' in rates.partners and opr):
         opr_flag = True
-        print 'Assuming an ortho / para ratio of {}.'.format(opr)
+        # print 'Assuming an ortho / para ratio of {}.'.format(opr)
     else:
         opr_flag = False
+
 
     # Dummy array to hold the results.
     # Hold up the 'jmax' transition, default is 10.
@@ -103,7 +105,7 @@ def runRADEX(species, widths, temperatures, densities, columns, **kwargs):
     t1 = time.time()
 
     if kwargs.get('verbose', True):
-        print 'Generated table in {}.'.format(seconds2hms(t1-t0))
+        print('Generated table in {}.'.format(seconds2hms(t1-t0)))
 
     # Save the file.
     fn = '{}_'.format(species)
